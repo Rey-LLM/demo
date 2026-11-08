@@ -22,6 +22,12 @@ bool fixed_digits(std::string_view s, std::size_t& pos, int n, unsigned& out) no
   return true;
 }
 
+// Days in month `mon` (1..12) of `year` in the proleptic Gregorian calendar.
+constexpr unsigned days_in_month(unsigned year, unsigned mon) noexcept {
+  if (mon == 2) return (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)) ? 29u : 28u;
+  return (mon == 4 || mon == 6 || mon == 9 || mon == 11) ? 30u : 31u;
+}
+
 bool mul_add_checked(std::int64_t& acc, int digit) noexcept {
   constexpr std::int64_t kMax = std::numeric_limits<std::int64_t>::max();
   if (acc > (kMax - digit) / 10) return false;
@@ -110,7 +116,10 @@ bool parse_timestamp_ms(std::string_view s, std::int64_t& out) noexcept {
     if (p >= s.size() || s[p++] != ':') return false;
     if (!fixed_digits(s, p, 2, ss)) return false;
   }
-  if (mon < 1 || mon > 12 || day < 1 || day > 31 || hh > 23 || mm > 59 || ss > 60) return false;
+  // Impossible dates (2024-02-31, 2023-02-29) are malformed: days_from_civil
+  // would otherwise roll them silently into the next month.
+  if (mon < 1 || mon > 12 || day < 1 || day > days_in_month(year, mon)) return false;
+  if (hh > 23 || mm > 59 || ss > 60) return false;
 
   std::int64_t millis = 0;
   if (p < s.size() && (s[p] == '.' || s[p] == ',')) {

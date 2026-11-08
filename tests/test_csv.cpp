@@ -110,6 +110,14 @@ TEST_CASE("fields: timestamps (ISO-8601 and epoch ms)") {
   CHECK(parse_timestamp_ms("2024-03-15", t) && t == 1710460800000LL);
   CHECK(parse_timestamp_ms("1710506096789", t) && t == 1710506096789LL);
   CHECK(parse_timestamp_ms("2024-02-29T00:00:00Z", t));
+  CHECK(parse_timestamp_ms("2000-02-29", t) && t == 951782400000LL);  // divisible by 400: leap
+  CHECK(parse_timestamp_ms("2024-12-31T23:59:59Z", t) && t == 1735689599000LL);
+  // Impossible calendar dates are malformed, never rolled into the next month.
+  CHECK(!parse_timestamp_ms("2024-02-31T00:00:00Z", t));
+  CHECK(!parse_timestamp_ms("2023-02-29T00:00:00Z", t));  // not a leap year
+  CHECK(!parse_timestamp_ms("1900-02-29", t));            // century, not divisible by 400
+  CHECK(!parse_timestamp_ms("2024-04-31", t));
+  CHECK(!parse_timestamp_ms("2024-01-00", t));
   CHECK(!parse_timestamp_ms("2024-13-01T00:00:00Z", t));
   CHECK(!parse_timestamp_ms("2024-01-01T25:00:00Z", t));
   CHECK(!parse_timestamp_ms("yesterday", t));

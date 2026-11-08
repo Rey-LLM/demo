@@ -146,6 +146,31 @@ TEST_CASE("layout: engine publishes snapshots through the triple buffer") {
   engine.stop();
 }
 
+TEST_CASE("layout: engine stop() returns while the layout is idle or running") {
+  // stop() once hung in join() when it landed between the layout thread's stop
+  // check and its control-counter load. That window is a few instructions
+  // wide, so this cycles start/pause/stop to land stop() at varying points of
+  // the idle loop: a smoke test of the shutdown path, not a deterministic
+  // reproduction (a regression would show up as a hang).
+  const HubTaxonomy tax = load_taxonomy();
+  const Graph g = make_graph(tax, 300);
+  ThreadPool pool(2);
+  LayoutParams p;
+  ForceSolver solver(g, tax, p, pool);
+  LayoutEngine engine(solver, g.node_count());
+  for (int cycle = 0; cycle < 200; ++cycle) {
+    engine.set_paused(true);
+    engine.start();
+    engine.set_paused(true);  // wakes the thread so it re-runs its checks as stop() arrives
+    engine.stop();
+    CHECK(!engine.status().running);
+  }
+  engine.set_paused(false);
+  engine.start();
+  engine.stop();  // stop while iterating
+  CHECK(!engine.status().running);
+}
+
 TEST_CASE("layout: internal (hub + BFS) node order maps back to graph order") {
   const HubTaxonomy tax = load_taxonomy();
   const Graph g = make_graph(tax, 1200);

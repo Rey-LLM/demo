@@ -224,14 +224,14 @@ abort. DESIGN_NOTES explains why.
 
 ## Tests
 
-`ftviz_tests` has 35 tests and needs no GPU or window. It covers:
+`ftviz_tests` has 36 tests and needs no GPU or window. It covers:
 
 - **Hashing**: the documented XXH3 formula and seeds, normalisation, and
   namespace separation, including custodial ids shared between fiat and
   chain.
 - **CSV and field parsers**: BOM, CRLF, quotes, reordered and extra columns,
   missing columns, structurally broken rows, fixed-point amounts, timestamps
-  and packed codes.
+  (including impossible dates such as Feb 31) and packed codes.
 - **Aggregation**: sums, counts and first/last timestamps; malformed rows;
   identical results for any thread count or chunk size; `.ftxb` matching the
   CSV semantics.
@@ -239,8 +239,8 @@ abort. DESIGN_NOTES explains why.
 - **Octree vs brute force**: under 2% relative error at θ = 0.8 (0.70%
   measured), exact at θ = 0, structure invariants.
 - **Layout**: bit-identical position checksums across runs and thread
-  counts, clustering and convergence, the internal node order, and triple
-  buffer hand-off.
+  counts, clustering and convergence, the internal node order, triple
+  buffer hand-off, and engine shutdown while idle or running.
 - **Core**: thread pool, MPMC queue, triple buffer, JSON, 128-bit
   accumulator and the chunker.
 

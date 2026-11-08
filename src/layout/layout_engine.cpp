@@ -85,10 +85,18 @@ void LayoutEngine::publish_iteration(const IterationStats& s) {
 }
 
 void LayoutEngine::thread_main(std::stop_token st) {
-  while (!st.stop_requested()) {
-    // Load the control counter BEFORE inspecting state: any change made after
-    // this load bumps the counter, so the wait below returns immediately.
+  for (;;) {
+    // Load the control counter BEFORE inspecting any state, the stop request
+    // included. stop(), set_paused() and reheat() each change their state and
+    // then call wake(), which bumps the counter, so a change that lands after
+    // this load makes the wait below return at once and is never lost.
+    // If the stop check came first, a stop() landing between that check and
+    // this load would be absorbed into `ctl`; the thread would then wait for a
+    // wake-up that never comes and stop() would hang in join().
+    // The acquire pairs with wake()'s release: once this load sees stop()'s
+    // bump, request_stop() happens-before the check below.
     const std::uint32_t ctl = control_.load(std::memory_order_acquire);
+    if (st.stop_requested()) return;
     if (reheat_requested_.exchange(false, std::memory_order_relaxed)) {
       solver_.reheat(solver_.params().initial_temperature * 0.25f);
       st_converged_.store(false, std::memory_order_relaxed);

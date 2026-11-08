@@ -85,7 +85,7 @@ Every non-`seq_cst` order is also justified next to the code.
 | Pool chunk claim | `next_chunk_` | Relaxed `fetch_add`: it only hands out indices; data visibility comes from the generation acquire. |
 | Pool completion | `pending_workers_` | Workers do an acq_rel decrement; the submitter acquire-loads or waits on it. Every write made inside the job happens-before `parallel_for` returns. |
 | Layout to render (`core/triple_buffer.hpp`) | One atomic byte: slot index plus FRESH bit | Writer and reader swap with acq_rel exchanges. Release publishes the snapshot contents; acquire guarantees a returned slot is no longer being read. A relaxed pre-check skips the RMW when nothing is new. |
-| Layout control (`layout/layout_engine.cpp`) | `control_` counter with `atomic::wait`/`notify` | Release on `wake()` and acquire in the layout thread, so `paused_` and `reheat_requested_` are seen together with the wake-up. |
+| Layout control (`layout/layout_engine.cpp`) | `control_` counter with `atomic::wait`/`notify` | Release on `wake()` and acquire in the layout thread, so `paused_` and `reheat_requested_` are seen together with the wake-up. The thread loads the counter before it checks the stop request or any other state, so a `stop()` that lands mid-check still makes the next wait return instead of hanging `join()`. |
 | HUD status counters | Independent relaxed atomics | Display only. Values may come from adjacent iterations, and nothing depends on them. |
 | CPU to GPU frame slots (`render/renderer.cpp`) | `glFenceSync` per slot, `glClientWaitSync` in `begin_frame` | Frame f waits for frame f − 3. After that, slot f mod 3's uniform, highlight and HUD regions, its timer queries and its readback copy are free. |
 | Pick readback (`render/picking.cpp`) | Fence after `glReadPixels` into a persistent PBO | Polled with a zero timeout, so the CPU never waits on the GPU. |
@@ -624,7 +624,9 @@ simulated clicks, picks, framing and HUD toggles:
   Extra fractional digits are truncated and counted. Overflow makes the row
   malformed. No floating point is involved.
 - **Timestamps.** ISO-8601 UTC, with optional fraction and offset, or epoch
-  milliseconds. Days are computed with Hinnant's civil-date algorithm.
+  milliseconds. Days are computed with Hinnant's civil-date algorithm. Dates
+  that do not exist, such as Feb 31 or Feb 29 in a non-leap year, make the
+  row malformed.
 - **Currency.** Packed ASCII into a `uint32`. Channels are matched
   case-insensitively against the eight names; anything else is malformed.
 - **Malformed rows.** Counted per worker. Each worker records its first K
@@ -731,7 +733,7 @@ allocations in our code (§7).
 
 **Builds**: GCC 13 and Clang 18, Release and Debug, all with
 `-DFTVIZ_WERROR=ON` and `-Wall -Wextra -Wpedantic -Wshadow -Wconversion`.
-All four have zero warnings, 35 of 35 tests pass, and every build gives the
+All four have zero warnings, 36 of 36 tests pass, and every build gives the
 same layout checksum.
 
 ### 10.2 Targets
