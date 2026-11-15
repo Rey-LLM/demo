@@ -24,11 +24,13 @@ inline std::string_view label_name(SourceLabel l) noexcept {
 }
 
 // Feeds, in HUD order. Each has its own state machine and replay fallback.
-enum class FeedId : std::uint8_t { BtcMempool = 0, BtcBlocks, Eth, Sol, Coinbase, Kraken, Fiat, Count };
+// FX is the ECB reference-rate poller (prices only, no flow events); FIAT is
+// the MODELED corridor generator and has no network connection.
+enum class FeedId : std::uint8_t { BtcMempool = 0, BtcBlocks, Eth, Sol, Coinbase, Kraken, Binance, Fx, Fiat, Count };
 inline constexpr std::size_t kFeedCount = static_cast<std::size_t>(FeedId::Count);
 // Short HUD/export names.
-inline constexpr std::array<std::string_view, kFeedCount> kFeedNames = {"BTC",      "BTC_BLOCKS", "ETH", "SOL",
-                                                                        "COINBASE", "KRAKEN",     "FIAT"};
+inline constexpr std::array<std::string_view, kFeedCount> kFeedNames = {
+    "BTC", "BTC_BLOCKS", "ETH", "SOL", "COINBASE", "KRAKEN", "BINANCE", "FX", "FIAT"};
 inline std::string_view feed_name(FeedId f) noexcept { return kFeedNames[static_cast<std::size_t>(f) % kFeedCount]; }
 
 enum class EventKind : std::uint8_t {
@@ -40,10 +42,12 @@ enum class EventKind : std::uint8_t {
 };
 
 // Assets and currencies. Codes double as the export's currency column.
-enum class Asset : std::uint8_t { BTC = 0, ETH, SOL, USD, EUR, GBP, JPY, CNY, HKD, Count };
+// USDT is only ever a quote currency (Binance pairs); it is valued with
+// Kraken's USDT/USD ticker, or at par until the first tick arrives.
+enum class Asset : std::uint8_t { BTC = 0, ETH, SOL, USD, EUR, GBP, JPY, CNY, HKD, USDT, Count };
 inline constexpr std::size_t kAssetCount = static_cast<std::size_t>(Asset::Count);
 inline constexpr std::array<std::string_view, kAssetCount> kAssetNames = {"BTC", "ETH", "SOL", "USD", "EUR",
-                                                                          "GBP", "JPY", "CNY", "HKD"};
+                                                                          "GBP", "JPY", "CNY", "HKD", "USDT"};
 inline std::string_view asset_name(Asset a) noexcept { return kAssetNames[static_cast<std::size_t>(a) % kAssetCount]; }
 
 inline constexpr std::uint8_t kEvPriceUnknown = 1u << 0;  // no USD price yet: usd_value is 0
@@ -74,7 +78,7 @@ struct VisualEvent {
   float start_s = 0.0f;  // live clock (s since session start) at which the arc leaves
   std::uint16_t src_hub = 0;
   std::uint16_t dst_hub = 0;
-  std::uint8_t tier = 1;  // 1..3
+  std::uint8_t tier = 1;  // 1..3 whales; 0 a flow trail (below the whale threshold)
   std::uint8_t pad[3] = {};
 };
 

@@ -9,13 +9,20 @@ namespace ftv {
 
 enum class LogLevel { Debug, Info, Warn, Error };
 
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(__MINGW32__)
+// MinGW builds use the C99-conforming stdio (__USE_MINGW_ANSI_STDIO=1), so %zu and %lld work.
+#define FTV_PRINTF_LIKE(fmt_idx, arg_idx) __attribute__((format(gnu_printf, fmt_idx, arg_idx)))
+#elif defined(__GNUC__) || defined(__clang__)
 #define FTV_PRINTF_LIKE(fmt_idx, arg_idx) __attribute__((format(printf, fmt_idx, arg_idx)))
 #else
 #define FTV_PRINTF_LIKE(fmt_idx, arg_idx)
 #endif
 
 void log_write(LogLevel level, const char* fmt, ...) FTV_PRINTF_LIKE(2, 3);
+
+// The text of the first Error-level message of the run (empty if none).
+// The Windows GUI build shows it in a message box when startup fails.
+const char* first_error_message() noexcept;
 
 }  // namespace ftv
 

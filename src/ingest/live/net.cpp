@@ -13,8 +13,21 @@
 #include <ws2tcpip.h>
 using socket_t = SOCKET;
 static constexpr socket_t kNoSocket = INVALID_SOCKET;
-static int poll_fd(WSAPOLLFD* p, int n, int ms) { return WSAPoll(p, static_cast<ULONG>(n), ms); }
-using pollfd_t = WSAPOLLFD;
+// select() rather than WSAPoll: WSAPoll does not report a failed non-blocking
+// connect on several Windows versions (and Wine), select's except set does.
+// Returns > 0 when ready, 0 on timeout, < 0 on error (failed connect).
+static int wait_socket(socket_t s, bool forWrite, int ms) {
+  fd_set rd, wr, ex;
+  FD_ZERO(&rd);
+  FD_ZERO(&wr);
+  FD_ZERO(&ex);
+  FD_SET(s, forWrite ? &wr : &rd);
+  FD_SET(s, &ex);
+  timeval tv{ms / 1000, (ms % 1000) * 1000};
+  const int n = ::select(0, &rd, &wr, &ex, &tv);
+  if (n <= 0) return n;
+  return FD_ISSET(s, &ex) ? -1 : 1;
+}
 static void close_socket(socket_t s) { closesocket(s); }
 static bool set_nonblocking(socket_t s, bool on) {
   u_long m = on ? 1 : 0;
@@ -32,8 +45,12 @@ static bool connect_in_progress() { return WSAGetLastError() == WSAEWOULDBLOCK; 
 #include <cerrno>
 using socket_t = int;
 static constexpr socket_t kNoSocket = -1;
-using pollfd_t = pollfd;
-static int poll_fd(pollfd_t* p, int n, int ms) { return ::poll(p, static_cast<nfds_t>(n), ms); }
+static int wait_socket(socket_t s, bool forWrite, int ms) {
+  pollfd p{};
+  p.fd = s;
+  p.events = forWrite ? POLLOUT : POLLIN;
+  return ::poll(&p, 1, ms);
+}
 static void close_socket(socket_t s) { ::close(s); }
 static bool set_nonblocking(socket_t s, bool on) {
   const int fl = fcntl(s, F_GETFL, 0);
@@ -46,6 +63,12 @@ static bool connect_in_progress() { return errno == EINPROGRESS; }
 #include <openssl/evp.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
+
+#if defined(_WIN32)
+#include <wincrypt.h>
+#else
+#include <sys/stat.h>
+#endif
 
 namespace ftv::net {
 
@@ -82,10 +105,24 @@ bool parse_url(std::string_view url, Url& out) {
     return false;
   }
   std::string_view rest = url.substr(at + 3);
-  const std::size_t slash = rest.find('/');
+  // Plain loops: GCC 13's LTO flags string_view::find here with a bogus
+  // -Wstringop-overread (MinGW builds).
+  std::size_t slash = std::string_view::npos;
+  for (std::size_t i = 0; i < rest.size(); ++i) {
+    if (rest[i] == '/') {
+      slash = i;
+      break;
+    }
+  }
   std::string_view hostport = rest.substr(0, slash);
   out.path = slash == std::string_view::npos ? std::string("/") : std::string(rest.substr(slash));
-  const std::size_t colon = hostport.find(':');
+  std::size_t colon = std::string_view::npos;
+  for (std::size_t i = 0; i < hostport.size(); ++i) {
+    if (hostport[i] == ':') {
+      colon = i;
+      break;
+    }
+  }
   if (colon != std::string_view::npos) {
     unsigned p = 0;
     const auto r = std::from_chars(hostport.data() + colon + 1, hostport.data() + hostport.size(), p);
@@ -104,19 +141,71 @@ bool parse_url(std::string_view url, Url& out) {
 
 namespace {
 
+// Trust anchors. A statically linked OpenSSL only knows the CA directory of
+// the machine it was built on, so the platform's own store is added:
+// Windows: every certificate in the system ROOT store (the same anchors the
+// browser and WinHTTP use). Linux and macOS: the first CA bundle that exists
+// among the distributions' standard locations.
+int add_platform_roots(SSL_CTX* ctx) {
+  int added = 0;
+#if defined(_WIN32)
+  X509_STORE* store = SSL_CTX_get_cert_store(ctx);
+  HCERTSTORE sys = CertOpenSystemStoreW(0, L"ROOT");
+  if (!sys) return 0;
+  PCCERT_CONTEXT c = nullptr;
+  while ((c = CertEnumCertificatesInStore(sys, c)) != nullptr) {
+    const unsigned char* der = c->pbCertEncoded;
+    X509* x = d2i_X509(nullptr, &der, static_cast<long>(c->cbCertEncoded));
+    if (!x) continue;
+    if (X509_STORE_add_cert(store, x) == 1) ++added;
+    X509_free(x);
+  }
+  CertCloseStore(sys, 0);
+  ERR_clear_error();  // duplicates report "cert already in hash table"
+#else
+  static const char* const kBundles[] = {
+      "/etc/ssl/certs/ca-certificates.crt",                 // Debian, Ubuntu, Arch, Alpine, Gentoo
+      "/etc/pki/tls/certs/ca-bundle.crt",                   // Fedora, RHEL, CentOS
+      "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",  // Fedora, RHEL (extracted)
+      "/etc/ssl/ca-bundle.pem",                             // openSUSE
+      "/etc/ssl/cert.pem",                                  // macOS, Alpine, OpenBSD
+  };
+  for (const char* b : kBundles) {
+    struct stat st {};
+    if (::stat(b, &st) == 0 && SSL_CTX_load_verify_locations(ctx, b, nullptr) == 1) {
+      added = 1;
+      break;
+    }
+  }
+  ERR_clear_error();
+#endif
+  return added;
+}
+
+// Winsock must be initialised before the first getaddrinfo()/socket() call,
+// which happens before any TLS context exists.
+void net_init() {
+#if defined(_WIN32)
+  static const bool started = [] {
+    WSADATA wsa;
+    return WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
+  }();
+  (void)started;
+#endif
+}
+
 struct SslGlobal {
   SSL_CTX* ctx = nullptr;
   SslGlobal() {
-#if defined(_WIN32)
-    WSADATA wsa;
-    WSAStartup(MAKEWORD(2, 2), &wsa);
-#endif
+    net_init();
     ctx = SSL_CTX_new(TLS_client_method());
     if (!ctx) return;
     SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
     SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);  // TLS verification is always on
     SSL_CTX_set_default_verify_paths(ctx);              // honours SSL_CERT_FILE / SSL_CERT_DIR
+    add_platform_roots(ctx);
     if (const char* f = std::getenv("SSL_CERT_FILE")) SSL_CTX_load_verify_locations(ctx, f, nullptr);
+    ERR_clear_error();
   }
 };
 
@@ -188,10 +277,7 @@ struct TlsStream::Impl {
   }
 
   bool wait(bool forWrite, int ms) {
-    pollfd_t p{};
-    p.fd = fd;
-    p.events = forWrite ? POLLOUT : POLLIN;
-    return poll_fd(&p, 1, ms) > 0;
+    return wait_socket(fd, forWrite, ms) > 0;
   }
 
   // Plain (pre-TLS) I/O, used for the proxy CONNECT exchange.
@@ -213,6 +299,7 @@ void TlsStream::close() noexcept { impl_->reset(); }
 bool TlsStream::is_open() const noexcept { return impl_->fd != kNoSocket; }
 
 NetError TlsStream::connect(const Url& url, int timeoutMs, std::string& detail) {
+  net_init();
   close();
   Impl& m = *impl_;
   m.tls = url.tls;
@@ -238,10 +325,7 @@ NetError TlsStream::connect(const Url& url, int timeoutMs, std::string& detail) 
     const int rc = ::connect(s, a->ai_addr, static_cast<int>(a->ai_addrlen));
     bool ok = rc == 0;
     if (!ok && connect_in_progress()) {
-      pollfd_t p{};
-      p.fd = s;
-      p.events = POLLOUT;
-      if (poll_fd(&p, 1, timeoutMs) > 0) {
+      if (wait_socket(s, true, timeoutMs) > 0) {
         int so = 0;
         socklen_t sl = sizeof(so);
         getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&so), &sl);
@@ -615,6 +699,16 @@ HttpsClient::HttpsClient(std::size_t maxBody) : max_body_(maxBody) {}
 
 NetError HttpsClient::post_json(const Url& url, std::string_view body, char* out, std::size_t capacity,
                                 std::size_t& len, int& status, int timeoutMs, std::string& detail) {
+  return request(true, url, body, out, capacity, len, status, timeoutMs, detail);
+}
+
+NetError HttpsClient::get(const Url& url, char* out, std::size_t capacity, std::size_t& len, int& status,
+                          int timeoutMs, std::string& detail) {
+  return request(false, url, std::string_view(), out, capacity, len, status, timeoutMs, detail);
+}
+
+NetError HttpsClient::request(bool post, const Url& url, std::string_view body, char* out, std::size_t capacity,
+                              std::size_t& len, int& status, int timeoutMs, std::string& detail) {
   len = 0;
   status = 0;
   for (int attempt = 0; attempt < 2; ++attempt) {
@@ -623,10 +717,13 @@ NetError HttpsClient::post_json(const Url& url, std::string_view body, char* out
       const NetError e = stream_.connect(url, timeoutMs, detail);
       if (e != NetError::None) return e;
     }
-    const std::string req = "POST " + url.path + " HTTP/1.1\r\nHost: " + url.host +
-                            "\r\nContent-Type: application/json\r\nAccept: application/json\r\nUser-Agent: ftviz"
-                            "\r\nConnection: keep-alive\r\nContent-Length: " +
-                            std::to_string(body.size()) + "\r\n\r\n" + std::string(body);
+    const std::string req =
+        post ? "POST " + url.path + " HTTP/1.1\r\nHost: " + url.host +
+                   "\r\nContent-Type: application/json\r\nAccept: application/json\r\nUser-Agent: ftviz"
+                   "\r\nConnection: keep-alive\r\nContent-Length: " +
+                   std::to_string(body.size()) + "\r\n\r\n" + std::string(body)
+             : "GET " + url.path + " HTTP/1.1\r\nHost: " + url.host +
+                   "\r\nAccept: application/json\r\nUser-Agent: ftviz\r\nConnection: keep-alive\r\n\r\n";
     if (stream_.write_all(req.data(), req.size(), timeoutMs) != NetError::None) {
       stream_.close();
       continue;  // stale keep-alive connection: reconnect once

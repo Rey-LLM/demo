@@ -30,6 +30,7 @@ flat out float v_head;  // arc parameter of the head
 flat out float v_trail; // trail length in arc parameter units
 flat out float v_halfw; // ribbon half-width / flash radius (device px)
 flat out float v_intensity;
+flat out float v_heat;  // 0 tier 1 (deep amber) .. 1 tier 3 (white gold)
 flat out uint v_kind;   // 0 arc, 1 flash
 out float v_fade;       // depth fade (1.0 near .. 0.35 far), like the normal arcs
 
@@ -64,8 +65,9 @@ void main() {
     tierF = float(l.hubs.z);
   }
   float flight = u_whale0.x, trailS = u_whale0.y, flashS = u_whale0.z;
-  uint tier = uint(clamp(tierF, 1.0, 3.0));
-  float peak = mix(u_whale0.w, u_whale1.x, float(tier - 1u) * 0.5);  // HDR intensity 4..8 by tier
+  uint tier = uint(clamp(tierF, 0.0, 3.0));
+  // HDR intensity 4..8 by whale tier; a flow trail (tier 0) at 45 % of tier 1.
+  float peak = tier == 0u ? u_whale0.w * 0.45 : mix(u_whale0.w, u_whale1.x, float(tier - 1u) * 0.5);
   float ui = u_ink.w;
   v_t = 0.0;
   v_side = 0.0;
@@ -73,6 +75,7 @@ void main() {
   v_head = age / flight;
   v_trail = trailS / flight;
   v_intensity = peak;
+  v_heat = tier == 0u ? 0.0 : float(tier - 1u) * 0.5;
   v_fade = 1.0;
 
   if (!flash) {
@@ -99,7 +102,7 @@ void main() {
     vec2 dir = sq - sp;
     dir = length(dir) < 1e-5 ? vec2(1.0, 0.0) : normalize(dir);
     vec2 nrm = vec2(-dir.y, dir.x);
-    float widthPx = (tier == 3u ? u_whale1.w : tier == 2u ? u_whale1.z : u_whale1.y) * ui;
+    float widthPx = (tier == 3u ? u_whale1.w : tier == 2u ? u_whale1.z : tier == 1u ? u_whale1.y : 0.6 * u_whale1.y) * ui;
     v_halfw = 0.5 * widthPx;
     float extent = v_halfw + 1.0;  // margin for the AA ramp
     cp.xy += px_to_clip(nrm * side * extent, cp.w);
@@ -110,7 +113,7 @@ void main() {
   } else {
     v_kind = 1u;
     float fa = age - flight;
-    if (fa < 0.0 || fa >= flashS) {
+    if (tier == 0u || fa < 0.0 || fa >= flashS) {  // flow trails end without a flash
       gl_Position = kCulled;
       return;
     }

@@ -27,6 +27,21 @@ void mmss(FixedText<N>& t, double seconds) noexcept {
   t.u64(r);
 }
 
+// HH:MM:SS UTC of an epoch-milliseconds time.
+template <std::size_t N>
+void hhmmss(FixedText<N>& t, std::int64_t ms) noexcept {
+  const std::int64_t s = ((ms / 1000) % 86400 + 86400) % 86400;
+  const auto two = [&t](std::int64_t v) {
+    if (v < 10) t.ch('0');
+    t.u64(static_cast<std::uint64_t>(v));
+  };
+  two(s / 3600);
+  t.ch(':');
+  two((s / 60) % 60);
+  t.ch(':');
+  two(s % 60);
+}
+
 template <std::size_t N>
 void usd(FixedText<N>& t, double v) noexcept {
   if (v < 0.0) {
@@ -59,7 +74,32 @@ LiveHudLayout LiveHud::layout(int width, int height, float feedsTop) noexcept {
 }
 
 void LiveHud::refresh(const LiveSnapshot& snap, const LiveHudInput& in) noexcept {
-  // ---- feed rows: "* BTC  LIVE  184 tx/s  drops 0" ----------------------------
+  // ---- summary: "LIVE 7/8 STREAMS   412 TX/S" ------------------------------------
+  summary_.clear();
+  {
+    std::size_t streams = 0, live = 0;
+    bool replaying = false;
+    double tps = 0.0;
+    for (std::size_t f = 0; f < kFeedCount; ++f) {
+      const FeedId id = static_cast<FeedId>(f);
+      if (id == FeedId::Fiat) continue;
+      tps += snap.feeds[f].tx_per_s;
+      if (mode_ != ModelMode::Live || !feeds_ || !config_ || !config_->feeds[f].enabled) continue;
+      ++streams;
+      const FeedStatus& st = feeds_->status(id);
+      if (st.replay.load(std::memory_order_relaxed)) replaying = true;
+      if (static_cast<FeedState>(st.state.load(std::memory_order_relaxed)) == FeedState::Live) ++live;
+    }
+    if (mode_ == ModelMode::Live) {
+      summary_.str("LIVE ").u64(live).ch('/').u64(streams).str(" STREAMS   ");
+      summary_.fixed(tps, tps < 10.0 ? 1 : 0).str(" TX/S");
+      if (replaying) summary_.str("   OFFLINE: REPLAY");
+    } else if (mode_ == ModelMode::Replay) {
+      summary_.str("REPLAY   ").fixed(tps, tps < 10.0 ? 1 : 0).str(" TX/S");
+    }
+  }
+
+  // ---- feed rows: "* BTC  LIVE  184 tx/s  120 ms  drops 0" -----------------------
   for (std::size_t f = 0; f < kFeedCount; ++f) {
     Row& row = rows_[f];
     row.text.clear();
@@ -101,10 +141,56 @@ void LiveHud::refresh(const LiveSnapshot& snap, const LiveHudInput& in) noexcept
     row.text.str("  ").str(feed_name(id)).pad_to(14).str(state).pad_to(28);
     if (fiat) {
       row.text.ch('$').si(fp.usd_per_s, 1).str("/s");
+    } else if (id == FeedId::Fx) {
+      // Reference rates, not flows: show the ECB date and EURUSD.
+      const FxBoard* fx = feeds_ ? &feeds_->fx() : nullptr;
+      const std::uint32_t d = fx ? fx->date() : 0;
+      if (d) {
+        row.text.str("ECB ").u64(d / 10000).ch('-');
+        if ((d / 100) % 100 < 10) row.text.ch('0');
+        row.text.u64((d / 100) % 100).ch('-');
+        if (d % 100 < 10) row.text.ch('0');
+        row.text.u64(d % 100).str("  EURUSD ").fixed(fx->usd(Asset::EUR), 4);
+      } else {
+        row.text.str("no rates yet");
+      }
+      continue;
     } else {
       row.text.fixed(fp.tx_per_s, fp.tx_per_s < 10.0 ? 1 : 0).str(" tx/s");
     }
-    row.text.pad_to(42).str("drops ").u64(drops);
+    if (!fiat && mode_ == ModelMode::Live && feeds_ && row.dot == 1) {
+      const std::int32_t lat = feeds_->status(id).latency_ms.load(std::memory_order_relaxed);
+      row.text.pad_to(42);
+      if (lat >= 0) {
+        if (lat >= 10000) {
+          row.text.fixed(lat / 1000.0, 0).str(" s");
+        } else {
+          row.text.u64(static_cast<std::uint64_t>(lat)).str(" ms");
+        }
+      } else {
+        row.text.ch('-');
+      }
+    }
+    row.text.pad_to(52).str("drops ").u64(drops);
+  }
+
+  // ---- whale tape: "12:04:31  $3.10M  BTC  BINANCE  NEW YORK > BITCOIN  LIVE" --------
+  tape_lines_ = 0;
+  for (std::size_t i = 0; i < snap.tape_count && i < tape_.size(); ++i) {
+    const WhaleRecord& w = snap.tape[i];
+    TapeLine& t = tape_[tape_lines_++];
+    t.tier = w.tier;
+    t.text.clear();
+    hhmmss(t.text, w.ts_ms);
+    t.text.str("  ");
+    usd(t.text, w.usd_value);
+    t.text.pad_to(19).str(asset_name(w.asset)).pad_to(25).str(feed_name(w.feed)).pad_to(37);
+    auto hubName = [this](std::uint16_t h) -> std::string_view {
+      if (h >= taxonomy_.size()) return "?";
+      const HubDef& d = taxonomy_.hubs()[h];
+      return d.display_name.empty() ? std::string_view(d.id) : std::string_view(d.display_name);
+    };
+    t.text.str(hubName(w.src_hub)).str(" > ").str(hubName(w.dst_hub)).str("  ").str(label_name(w.label));
   }
 
   // ---- hub panel ---------------------------------------------------------------
@@ -193,15 +279,31 @@ void LiveHud::emit(HudRenderer& hud, const LiveHudLayout& l, const LiveHudInput&
   const float lh = HudRenderer::line_height(s);
   const float adv = 6.0f * s;
 
-  // Feed rows.
+  // Summary, feed rows, whale tape.
   if (in.show_feeds) {
     float y = l.feeds_y;
+    if (summary_.size() > 0) {
+      hud.text(l.feeds_x, y, s, kInk, summary_.view());
+      y += lh * 1.4f;
+    }
     for (const Row& r : rows_) {
       if (r.dot == 0) continue;
       const char sym[1] = {r.dot == 3 ? kGlyphRing : kGlyphDot};
       hud.text(l.feeds_x, y, s, r.dot == 2 ? kInkDim : kInk, std::string_view(sym, 1));
       hud.text(l.feeds_x, y, s, r.dot == 2 ? kInkMid : kInk, r.text.view());
       y += lh;
+    }
+    if (tape_lines_ > 0) {
+      y += lh * 0.8f;
+      hud.text(l.feeds_x, y, s, kInkDim, "WHALE TAPE");
+      y += lh;
+      for (std::size_t i = 0; i < tape_lines_; ++i) {
+        // Newest on top; older lines fade. Tier-3 whales in amber.
+        const TapeLine& t = tape_[i];
+        const std::uint32_t c = t.tier >= 3 ? (i < 3 ? kAmber : kAmberDim) : (i == 0 ? kInk : i < 4 ? kInkMid : kInkDim);
+        hud.text(l.feeds_x, y, s, c, t.text.view());
+        y += lh;
+      }
     }
   }
 

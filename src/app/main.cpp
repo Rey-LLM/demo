@@ -9,11 +9,29 @@
 #include "app/application.hpp"
 #include "app/cli.hpp"
 
+#include "core/log.hpp"
+
 #if defined(_WIN32)
 #include <windows.h>
 #endif
 
 namespace {
+
+#if defined(FTVIZ_WIN32_GUI)
+// The GUI-subsystem build opens no console on double-click. Started from a
+// terminal, it attaches to that console so logs and --help still print.
+bool attach_parent_console() {
+  if (!AttachConsole(ATTACH_PARENT_PROCESS)) return false;
+  FILE* f = nullptr;
+  freopen_s(&f, "CONOUT$", "w", stdout);
+  freopen_s(&f, "CONOUT$", "w", stderr);
+  return true;
+}
+
+void show_error_box(const char* text) {
+  MessageBoxA(nullptr, text, "ftviz", MB_OK | MB_ICONERROR);
+}
+#endif
 
 std::string executable_dir(const char* argv0) {
   namespace fs = std::filesystem;
@@ -35,16 +53,31 @@ std::string executable_dir(const char* argv0) {
 }  // namespace
 
 int main(int argc, char** argv) {
+#if defined(FTVIZ_WIN32_GUI)
+  const bool console = attach_parent_console();
+#endif
   ftv::CliOptions options;
   std::string error;
   if (!ftv::parse_cli(argc, argv, options, error)) {
     std::fprintf(stderr, "error: %s\n\n", error.c_str());
     ftv::print_usage(argv[0]);
+#if defined(FTVIZ_WIN32_GUI)
+    if (!console) show_error_box(("Invalid arguments: " + error).c_str());
+#endif
     return 2;
   }
   if (options.help) {
     ftv::print_usage(argv[0]);
     return 0;
   }
-  return ftv::run_application(options, executable_dir(argv[0]));
+  const int code = ftv::run_application(options, executable_dir(argv[0]));
+#if defined(FTVIZ_WIN32_GUI)
+  if (code != 0 && !console) {
+    const char* why = ftv::first_error_message();
+    show_error_box((std::string("ftviz stopped with an error:\n\n") + (*why ? why : "see the log") +
+                    "\n\nRun ftviz.exe from a terminal to see the full log.")
+                       .c_str());
+  }
+#endif
+  return code;
 }

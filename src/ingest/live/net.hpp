@@ -87,7 +87,8 @@ class WebSocket {
   std::uint64_t mask_state_ = 0x2545F4914F6CDD1Dull;
 };
 
-// One HTTP/1.1 POST with a JSON body on a kept-alive TLS connection.
+// HTTP/1.1 requests (a JSON POST or a GET) on a kept-alive TLS connection.
+// Redirects are not followed: a 3xx answer is NetError::HttpStatus.
 class HttpsClient {
  public:
   explicit HttpsClient(std::size_t maxBody = std::size_t{8} << 20);
@@ -95,9 +96,14 @@ class HttpsClient {
   // (`capacity` bytes). `status` receives the HTTP status code.
   NetError post_json(const Url& url, std::string_view body, char* out, std::size_t capacity, std::size_t& len,
                      int& status, int timeoutMs, std::string& detail);
+  // GET url.path; the response body goes to `out` like post_json.
+  NetError get(const Url& url, char* out, std::size_t capacity, std::size_t& len, int& status, int timeoutMs,
+               std::string& detail);
   void close() noexcept { stream_.close(); }
 
  private:
+  NetError request(bool post, const Url& url, std::string_view body, char* out, std::size_t capacity,
+                   std::size_t& len, int& status, int timeoutMs, std::string& detail);
   TlsStream stream_;
   std::size_t max_body_;
   std::string host_;

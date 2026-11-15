@@ -8,12 +8,23 @@
 // ETH and SOL also make follow-up requests (eth_getBlockByNumber on the same
 // socket; getBlock over HTTPS), limited by a token bucket to the configured
 // requests per second (at most 5).
+//
+// A feed with fallback_urls moves to the next URL when a connection attempt
+// fails before any data arrived (DNS, TCP, proxy, TLS, HTTP status such as
+// Binance's 451 for restricted regions) and wraps around after the last.
+//
+// FX is not a stream: it GETs the ECB reference rates every poll_s seconds.
+//
+// Replay fallback policy (feeds.json "fallback_policy"): by default the
+// capture stands in for a feed only while no feed at all is LIVE, i.e. the
+// machine is offline; "per_feed" restores the v2 behaviour.
 
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "core/log.hpp"
 #include "ingest/live/live_runtime.hpp"
@@ -54,7 +65,7 @@ class Adapter {
                  c.all->backoff_base_s, c.all->backoff_cap_s),
         ws_(c.all->max_frame_bytes),
         buf_(c.all->max_frame_bytes),
-        http_buf_(id_ == FeedId::Sol ? c.all->max_frame_bytes : 16),
+        http_buf_(id_ == FeedId::Sol ? c.all->max_frame_bytes : id_ == FeedId::Fx ? 65536 : 16),
         limiter_(c.cfg->max_requests_per_s) {
     ctx_.prices = c.prices;
     ctx_.hubs = c.hubs;
@@ -63,19 +74,30 @@ class Adapter {
   }
 
   void run() {
-    net::Url url;
-    if (!net::parse_url(c_.cfg->url, url)) {
-      FTV_LOG_ERROR("[live] %s: bad url %s", feed_name(id_).data(), c_.cfg->url.c_str());
-      note(sm_.on_offline(utc_now_ms()));
-      while (!st_.stop_requested()) wait_ms(250);
-      return;
+    // The primary URL, then the fallbacks.
+    urls_.push_back(c_.cfg->url);
+    for (const std::string& u : c_.cfg->fallback_urls) urls_.push_back(u);
+    for (const std::string& u : urls_) {
+      net::Url parsed;
+      if (!net::parse_url(u, parsed)) {
+        FTV_LOG_ERROR("[live] %s: bad url %s", feed_name(id_).data(), u.c_str());
+        note(sm_.on_offline(utc_now_ms()));
+        while (!st_.stop_requested()) wait_ms(250);
+        return;
+      }
+      parsed_.push_back(parsed);
     }
     if (id_ == FeedId::Sol) net::parse_url(c_.cfg->rpc_url, rpc_url_);
+    if (id_ == FeedId::Fx) {
+      run_poller();
+      return;
+    }
     while (!st_.stop_requested()) {
       note(sm_.on_connecting(utc_now_ms()));
       std::string detail;
-      const net::NetError err = ws_.open(url, 10000, detail);
+      const net::NetError err = ws_.open(parsed_[url_index_], 10000, detail);
       if (err != net::NetError::None) {
+        next_url();
         fail(err, detail);
         continue;
       }
@@ -91,13 +113,72 @@ class Adapter {
   }
 
  private:
+  void next_url() {
+    if (parsed_.size() < 2) return;
+    url_index_ = (url_index_ + 1) % parsed_.size();
+    c_.status->url_index.store(static_cast<std::uint8_t>(url_index_), std::memory_order_relaxed);
+    FTV_LOG_INFO("[live] %s: trying %s", feed_name(id_).data(), urls_[url_index_].c_str());
+  }
+
+  // Is any feed (this one included) receiving data right now?
+  bool any_feed_live() const noexcept {
+    if (!c_.all_status) return false;
+    for (std::size_t f = 0; f < kFeedCount; ++f) {
+      if (!c_.all->feeds[f].enabled || static_cast<FeedId>(f) == FeedId::Fiat) continue;
+      const auto s = static_cast<FeedState>((*c_.all_status)[f].state.load(std::memory_order_relaxed));
+      if (s == FeedState::Live || s == FeedState::Degraded) return true;
+    }
+    return false;
+  }
+
   void note(bool changed) {
     const std::int64_t now = utc_now_ms();
+    // The state machine decides when this feed would need the capture; the
+    // policy decides whether it gets it (by default only when nothing is LIVE).
+    const bool replay = sm_.replay_active() && (c_.all->fallback_per_feed || !any_feed_live());
     c_.status->state.store(static_cast<std::uint8_t>(sm_.state()), std::memory_order_relaxed);
-    c_.status->replay.store(sm_.replay_active(), std::memory_order_relaxed);
-    if (changed) {
-      const FeedTransition t{now, sm_.state(), sm_.replay_active()};
+    c_.status->replay.store(replay, std::memory_order_relaxed);
+    if (changed || replay != replay_published_) {
+      replay_published_ = replay;
+      const FeedTransition t{now, sm_.state(), replay};
       (void)c_.transitions->try_push(t);  // 64 slots; the model drains them every 10 ms
+    }
+  }
+
+  // FX: one HTTPS GET every poll_s seconds (retries follow the backoff).
+  void run_poller() {
+    note(sm_.on_connecting(utc_now_ms()));
+    while (!st_.stop_requested()) {
+      std::size_t len = 0;
+      int status = 0;
+      std::string detail;
+      const net::NetError e = http_.get(parsed_[url_index_], http_buf_.data(), http_buf_.capacity(), len, status,
+                                        15000, detail);
+      http_.close();  // one request per poll: no idle keep-alive connection
+      if (e != net::NetError::None) {
+        if (e != net::NetError::RateLimited) next_url();
+        fail(e, detail);
+        continue;
+      }
+      http_buf_.data()[len] = '\0';
+      ParseResult r;
+      batch_.clear();
+      ctx_.recv_ms = utc_now_ms();
+      r = parse_ecb_rates(parser_, http_buf_.data(), len, ctx_, c_.prices, c_.fx);
+      if (r.status != ParseStatus::Ok) {
+        fail(r.status == ParseStatus::RateLimited ? net::NetError::RateLimited : net::NetError::Protocol,
+             "unexpected FX response");
+        continue;
+      }
+      handle(r);
+      // Between polls the feed stays LIVE; the stale watchdog does not apply.
+      const auto until = std::chrono::steady_clock::now() +
+                         std::chrono::milliseconds(static_cast<std::int64_t>(c_.cfg->poll_s * 1000.0));
+      while (!st_.stop_requested() && std::chrono::steady_clock::now() < until) {
+        sm_.on_message(utc_now_ms());
+        note(false);
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+      }
     }
   }
 
@@ -153,6 +234,7 @@ class Adapter {
       case FeedId::Sol: return parse_sol_rpc(parser_, msg, len, ctx_, batch_);
       case FeedId::Coinbase: return parse_coinbase(parser_, msg, len, ctx_, batch_, c_.prices);
       case FeedId::Kraken: return parse_kraken(parser_, msg, len, ctx_, batch_, c_.prices);
+      case FeedId::Binance: return parse_binance(parser_, msg, len, ctx_, batch_, c_.prices);
       default: return {ParseStatus::Ignored};
     }
   }
@@ -161,6 +243,14 @@ class Adapter {
     FeedStatus& s = *c_.status;
     std::uint64_t pushed = 0, dropped = batch_.overflow();
     for (std::size_t i = 0; i < batch_.size(); ++i) {
+      const LiveEvent& e = batch_[i];
+      // Latency: only flow events stamped by the source (blocks carry miner
+      // time, which can be minutes off, and are left out).
+      if ((e.kind == EventKind::Transaction || e.kind == EventKind::Trade) && e.ts_ms != ctx_.recv_ms) {
+        const double lag = static_cast<double>(std::clamp<std::int64_t>(ctx_.recv_ms - e.ts_ms, 0, 600000));
+        latency_ema_ = latency_ema_ < 0.0 ? lag : latency_ema_ + 0.05 * (lag - latency_ema_);
+        s.latency_ms.store(static_cast<std::int32_t>(latency_ema_ + 0.5), std::memory_order_relaxed);
+      }
       if (c_.ring->try_push(batch_[i])) {
         ++pushed;
       } else {
@@ -297,6 +387,11 @@ class Adapter {
   unsigned next_id_ = 0;
   bool pending_ok_ = true;
   bool logged_once_ = false;
+  bool replay_published_ = false;
+  double latency_ema_ = -1.0;
+  std::vector<std::string> urls_;
+  std::vector<net::Url> parsed_;
+  std::size_t url_index_ = 0;
 };
 
 }  // namespace

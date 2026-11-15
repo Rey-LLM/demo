@@ -75,9 +75,10 @@ class ReplayDriver {
   // Plays forward to `relMs` (ms since t0 on the looping timeline). Whales
   // are reported through `onWhale(record, relSeconds)` when given.
   template <class F>
-  void advance_to(LiveModel& model, std::int64_t relMs, F&& onWhale) noexcept;
+  // onApplied(event, whale or nullptr, timeline seconds) for every applied record.
+  void advance_to(LiveModel& model, std::int64_t relMs, F&& onApplied) noexcept;
   void advance_to(LiveModel& model, std::int64_t relMs) noexcept {
-    advance_to(model, relMs, [](const WhaleRecord&, double) {});
+    advance_to(model, relMs, [](const LiveEvent&, const WhaleRecord*, double) {});
   }
   // Jumps to `relMs` within [0, duration): nearest keyframe, then forward.
   bool seek(LiveModel& model, std::int64_t relMs) noexcept;
@@ -96,7 +97,7 @@ class ReplayDriver {
 };
 
 template <class F>
-void ReplayDriver::advance_to(LiveModel& model, std::int64_t relMs, F&& onWhale) noexcept {
+void ReplayDriver::advance_to(LiveModel& model, std::int64_t relMs, F&& onApplied) noexcept {
   const std::int64_t D = cap_.duration_ms > 0 ? cap_.duration_ms : 1;
   while (true) {
     const std::int64_t loopBase = loop_ * D;
@@ -108,7 +109,8 @@ void ReplayDriver::advance_to(LiveModel& model, std::int64_t relMs, F&& onWhale)
       e.ts_ms = cap_.t0_ms + rel;
       e.label = SourceLabel::Replay;
       WhaleRecord w;
-      if (model.apply(e, e.ts_ms, &w)) onWhale(w, static_cast<double>(rel) / 1000.0);
+      const bool whale = model.apply(e, e.ts_ms, &w);
+      onApplied(e, whale ? &w : nullptr, static_cast<double>(rel) / 1000.0);
       ++cursor_;
     }
     if (cursor_ < cap_.records.size() || relMs < loopBase + D) break;

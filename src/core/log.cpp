@@ -1,9 +1,18 @@
 #include "core/log.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 
 namespace ftv {
+
+namespace {
+char g_first_error[512] = {};
+std::atomic<bool> g_have_error{false};
+}  // namespace
+
+const char* first_error_message() noexcept { return g_first_error; }
 
 void log_write(LogLevel level, const char* fmt, ...) {
   static constexpr const char* kTags[] = {"debug", " info", " warn", "error"};
@@ -20,6 +29,12 @@ void log_write(LogLevel level, const char* fmt, ...) {
   va_end(args);
   std::size_t len = static_cast<std::size_t>(n) + (m > 0 ? static_cast<std::size_t>(m) : 0u);
   if (len > sizeof(line) - 2) len = sizeof(line) - 2;
+  if (level == LogLevel::Error && !g_have_error.exchange(true)) {
+    const std::size_t body = len - static_cast<std::size_t>(n);
+    const std::size_t k = body < sizeof(g_first_error) - 1 ? body : sizeof(g_first_error) - 1;
+    std::memcpy(g_first_error, line + n, k);
+    g_first_error[k] = 0;
+  }
   line[len++] = '\n';
   std::fwrite(line, 1, len, stderr);
 }

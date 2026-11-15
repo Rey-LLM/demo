@@ -3,9 +3,16 @@
 #include <cstdio>
 #include <filesystem>
 
+#include "core/embedded_fs.hpp"
+
 namespace ftv {
 
 std::optional<std::string> read_text_file(const std::string& path) {
+  if (is_embedded_path(path)) {
+    const EmbeddedFile* e = find_embedded(path);
+    if (!e) return std::nullopt;
+    return std::string(reinterpret_cast<const char*>(e->data), e->size);
+  }
   std::FILE* f = std::fopen(path.c_str(), "rb");
   if (!f) return std::nullopt;
   std::string out;
@@ -17,6 +24,7 @@ std::optional<std::string> read_text_file(const std::string& path) {
 }
 
 bool file_exists(const std::string& path) {
+  if (is_embedded_path(path)) return find_embedded(path) != nullptr;
   std::error_code ec;
   return std::filesystem::is_regular_file(path, ec);
 }

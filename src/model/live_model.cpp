@@ -8,6 +8,7 @@
 
 #include <xxhash.h>
 
+#include "core/file_util.hpp"
 #include "model/hub_taxonomy.hpp"
 
 namespace ftv {
@@ -294,6 +295,8 @@ void LiveModel::record_transition(FeedId feed, const FeedTransition& t) noexcept
 
 void LiveModel::fill_snapshot(LiveSnapshot& o) const noexcept {
   const std::size_t H = cfg_.hub_count;
+  o.tape_count = std::min(whale_n_, LiveSnapshot::kTapeLength);
+  for (std::size_t i = 0; i < o.tape_count; ++i) o.tape[i] = whales_[whale_n_ - 1 - i];
   o.now_ms = now_ms_;
   o.session_start_ms = session_start_ms_;
   o.hub_count = H;
@@ -483,11 +486,12 @@ void SnapshotExchange::release(const LiveSnapshot* s) noexcept {
 bool load_corridors(const std::string& path, const HubTaxonomy& taxonomy, std::vector<Corridor>& out,
                     std::string& error) {
   out.clear();
-  std::ifstream f(path);
-  if (!f) {
+  const auto text = read_text_file(path);  // a path on disk or an embedded resource
+  if (!text) {
     error = "cannot open " + path;
     return false;
   }
+  std::istringstream f(*text);
   std::string line;
   bool header = true;
   int lineNo = 0;

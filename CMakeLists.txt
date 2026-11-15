@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ftviz VERSION 2.0.0 LANGUAGES C CXX)
+project(ftviz VERSION 3.0.0 LANGUAGES C CXX)
 
 # ----------------------------------------------------------------------------
 # Global settings
@@ -19,6 +19,20 @@ option(FTVIZ_BUILD_TOOLS   "Build tools (synthetic data generator)"             
 option(FTVIZ_WERROR        "Treat warnings as errors"                           OFF)
 option(FTVIZ_NATIVE        "Compile with -march=native (non-portable binaries)" OFF)
 option(FTVIZ_GLFW_WAYLAND  "Build GLFW with Wayland support on Linux"           OFF)
+# Standalone binary: static C/C++ runtime (/MT on MSVC, -static on MinGW,
+# -static-libstdc++/-static-libgcc on Linux) and static OpenSSL. GLFW, glad,
+# GLM, simdjson, xxHash and stb are always compiled in.
+option(FTVIZ_STATIC        "Link the runtime and OpenSSL statically"           ON)
+option(FTVIZ_WIN32_GUI     "Windows: GUI subsystem (no console window on double-click)" ON)
+
+if(FTVIZ_STATIC)
+  set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+  # Must be set before any target exists (policy CMP0091, CMake >= 3.15).
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  set(USE_MSVC_RUNTIME_LIBRARY_DLL OFF CACHE BOOL "" FORCE)  # GLFW
+  set(OPENSSL_USE_STATIC_LIBS TRUE)
+  set(OPENSSL_MSVC_STATIC_RT TRUE)
+endif()
 
 find_package(Threads REQUIRED)
 
@@ -56,7 +70,8 @@ target_include_directories(ftviz_simdjson SYSTEM PUBLIC ${simdjson_SOURCE_DIR}/s
 target_compile_definitions(ftviz_simdjson PUBLIC SIMDJSON_EXCEPTIONS=0)
 set_target_properties(ftviz_simdjson PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-# TLS for the live feeds (system OpenSSL >= 1.1.1; peer verification is always on).
+# TLS for the live feeds (OpenSSL >= 1.1.1; peer verification is always on).
+# FTVIZ_STATIC links libssl.a / libcrypto.a (vcpkg x64-windows-static on MSVC).
 find_package(OpenSSL 1.1.1 REQUIRED)
 
 # Git revision recorded in export session.json.
@@ -111,8 +126,7 @@ if(FTVIZ_BUILD_APP)
   set(FTVIZ_HAVE_EGL OFF)
   if(UNIX AND NOT APPLE)
     find_path(FTVIZ_EGL_INCLUDE_DIR EGL/egl.h)
-    find_library(FTVIZ_EGL_LIBRARY EGL)
-    if(FTVIZ_EGL_INCLUDE_DIR AND FTVIZ_EGL_LIBRARY)
+    if(FTVIZ_EGL_INCLUDE_DIR)
       set(FTVIZ_HAVE_EGL ON)
     endif()
   endif()
@@ -145,6 +159,10 @@ function(ftviz_target_defaults tgt)
       target_compile_options(${tgt} PRIVATE /WX)
     endif()
   else()
+    if(MINGW)
+      # C99 printf (%zu, %lld) instead of msvcrt's.
+      target_compile_definitions(${tgt} PRIVATE __USE_MINGW_ANSI_STDIO=1 NOMINMAX WIN32_LEAN_AND_MEAN)
+    endif()
     target_compile_options(${tgt} PRIVATE -Wall -Wextra -Wpedantic -Wshadow -Wconversion
                                           -Wno-sign-conversion -Wnon-virtual-dtor)
     # errno is never read after math calls; this lets sqrt and friends
@@ -164,6 +182,59 @@ function(ftviz_target_defaults tgt)
   target_include_directories(${tgt} PUBLIC ${PROJECT_SOURCE_DIR}/src)
 endfunction()
 
+# Link options for executables in a standalone build.
+function(ftviz_executable_defaults tgt)
+  ftviz_target_defaults(${tgt})
+  if(FTVIZ_STATIC AND NOT MSVC)
+    if(WIN32)
+      target_link_options(${tgt} PRIVATE -static)  # MinGW: libstdc++, libgcc, winpthread
+    elseif(NOT APPLE)
+      # glibc, libGL and the X11 client libraries stay dynamic: the GL driver
+      # must come from the system (GLFW and our EGL path dlopen them).
+      target_link_options(${tgt} PRIVATE -static-libstdc++ -static-libgcc)
+    endif()
+  endif()
+endfunction()
+
+# ----------------------------------------------------------------------------
+# Embedded resources: every runtime file becomes a constexpr byte array
+# (cmake/embed_resources.cmake), so the binary needs no folders next to it.
+# ----------------------------------------------------------------------------
+file(GLOB FTVIZ_EMBED_SHADERS RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS
+  ${PROJECT_SOURCE_DIR}/shaders/*.vert ${PROJECT_SOURCE_DIR}/shaders/*.frag ${PROJECT_SOURCE_DIR}/shaders/*.glsl)
+list(SORT FTVIZ_EMBED_SHADERS)
+set(FTVIZ_EMBEDDED_FILES
+  ${FTVIZ_EMBED_SHADERS}
+  config/hubs.json
+  config/render.json
+  config/theme.json
+  config/feeds.json
+  config/flows_baseline.csv
+  assets/coastlines_110m.bin
+  assets/coastlines_50m.bin
+  assets/replay/default.ftxcap)
+set(FTVIZ_EMBED_DIR ${PROJECT_BINARY_DIR}/generated)
+set(FTVIZ_EMBED_DEPS)
+foreach(f IN LISTS FTVIZ_EMBEDDED_FILES)
+  list(APPEND FTVIZ_EMBED_DEPS ${PROJECT_SOURCE_DIR}/${f})
+endforeach()
+# The list goes through a file: semicolons do not survive a custom command line.
+string(REPLACE ";" "\n" FTVIZ_EMBED_LIST "${FTVIZ_EMBEDDED_FILES}")
+file(CONFIGURE OUTPUT ${FTVIZ_EMBED_DIR}/embedded_files.txt CONTENT "${FTVIZ_EMBED_LIST}\n")
+add_custom_command(
+  OUTPUT ${FTVIZ_EMBED_DIR}/embedded_index.cpp
+  COMMAND ${CMAKE_COMMAND} -DROOT=${PROJECT_SOURCE_DIR} -DOUT_DIR=${FTVIZ_EMBED_DIR}
+          -DLIST_FILE=${FTVIZ_EMBED_DIR}/embedded_files.txt -P ${PROJECT_SOURCE_DIR}/cmake/embed_resources.cmake
+  DEPENDS ${FTVIZ_EMBED_DEPS} ${FTVIZ_EMBED_DIR}/embedded_files.txt ${PROJECT_SOURCE_DIR}/cmake/embed_resources.cmake
+  COMMENT "Embedding shaders, config, coastlines and the replay capture"
+  VERBATIM)
+add_library(ftviz_embedded STATIC src/core/embedded_fs.cpp ${FTVIZ_EMBED_DIR}/embedded_index.cpp)
+ftviz_target_defaults(ftviz_embedded)
+target_include_directories(ftviz_embedded PRIVATE ${FTVIZ_EMBED_DIR})
+# Large constant tables gain nothing from LTO.
+set_property(TARGET ftviz_embedded PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
+set_property(TARGET ftviz_embedded PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO FALSE)
+
 # ----------------------------------------------------------------------------
 # Libraries (one per mandatory module; render/app only with GL)
 # ----------------------------------------------------------------------------
@@ -173,7 +244,7 @@ add_library(ftviz_core STATIC
   src/core/thread_pool.cpp
   src/core/file_util.cpp)
 ftviz_target_defaults(ftviz_core)
-target_link_libraries(ftviz_core PUBLIC Threads::Threads)
+target_link_libraries(ftviz_core PUBLIC Threads::Threads ftviz_embedded)
 
 add_library(ftviz_ingest STATIC
   src/ingest/mapped_file.cpp
@@ -217,7 +288,8 @@ add_library(ftviz_live STATIC
 ftviz_target_defaults(ftviz_live)
 target_link_libraries(ftviz_live PUBLIC ftviz_model PRIVATE ftviz_simdjson OpenSSL::SSL OpenSSL::Crypto)
 if(WIN32)
-  target_link_libraries(ftviz_live PRIVATE ws2_32)
+  # crypt32: TLS trust comes from the Windows certificate store (net.cpp).
+  target_link_libraries(ftviz_live PRIVATE ws2_32 crypt32 user32 advapi32 bcrypt)
 endif()
 
 add_library(ftviz_export STATIC src/export/exporter.cpp)
@@ -239,8 +311,9 @@ if(FTVIZ_BUILD_APP)
   target_link_libraries(ftviz_render PUBLIC ftviz_layout $<IF:$<CONFIG:Debug>,ftviz_glad_debug,ftviz_glad> glfw)
   target_compile_definitions(ftviz_render PUBLIC GLFW_INCLUDE_NONE)
   if(FTVIZ_HAVE_EGL)
+    # Headers only: libEGL is dlopen()ed at run time (gl_context.cpp).
     target_include_directories(ftviz_render SYSTEM PRIVATE ${FTVIZ_EGL_INCLUDE_DIR})
-    target_link_libraries(ftviz_render PUBLIC ${FTVIZ_EGL_LIBRARY})
+    target_link_libraries(ftviz_render PUBLIC ${CMAKE_DL_LIBS})
     target_compile_definitions(ftviz_render PRIVATE FTVIZ_HAVE_EGL=1)
   endif()
 
@@ -265,25 +338,29 @@ if(FTVIZ_BUILD_APP)
     $<$<CONFIG:Debug>:FTVIZ_COUNT_ALLOCATIONS=1>)
 
   add_executable(ftviz src/app/main.cpp)
-  ftviz_target_defaults(ftviz)
+  ftviz_executable_defaults(ftviz)
   target_link_libraries(ftviz PRIVATE ftviz_app)
-  # Ship shaders, config and assets next to the binary so it runs from the
-  # build dir. Runs on every build so an edited shader or asset is never stale.
-  add_custom_target(ftviz_runtime_files ALL
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/shaders $<TARGET_FILE_DIR:ftviz>/shaders
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/config  $<TARGET_FILE_DIR:ftviz>/config
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/assets  $<TARGET_FILE_DIR:ftviz>/assets
-    VERBATIM)
-  add_dependencies(ftviz_runtime_files ftviz)
+  if(WIN32)
+    if(FTVIZ_WIN32_GUI)
+      # No console window on double-click; main() stays the entry point and a
+      # console it was started from is re-attached (main.cpp).
+      set_target_properties(ftviz PROPERTIES WIN32_EXECUTABLE TRUE)
+      if(MSVC)
+        target_link_options(ftviz PRIVATE /ENTRY:mainCRTStartup)
+      endif()
+      target_compile_definitions(ftviz PRIVATE FTVIZ_WIN32_GUI=1)
+    endif()
+  endif()
+  # Everything the binary needs is compiled into it (no runtime folders).
 endif()
 
 if(FTVIZ_BUILD_TOOLS)
   add_executable(gen_synthetic tools/gen_synthetic.cpp)
-  ftviz_target_defaults(gen_synthetic)
+  ftviz_executable_defaults(gen_synthetic)
   target_link_libraries(gen_synthetic PRIVATE ftviz_ingest)
   # Generates the bundled SYNTHETIC replay capture (assets/replay/default.ftxcap).
   add_executable(gen_capture tools/gen_capture.cpp)
-  ftviz_target_defaults(gen_capture)
+  ftviz_executable_defaults(gen_capture)
   target_link_libraries(gen_capture PRIVATE ftviz_model)
 endif()
 
@@ -302,7 +379,7 @@ if(FTVIZ_BUILD_TESTS)
     tests/test_export.cpp
     src/app/interaction.cpp
     src/render/camera.cpp)
-  ftviz_target_defaults(ftviz_tests)
+  ftviz_executable_defaults(ftviz_tests)
   target_link_libraries(ftviz_tests PRIVATE ftviz_layout ftviz_live ftviz_export)
   target_compile_definitions(ftviz_tests PRIVATE FTVIZ_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
   add_test(NAME ftviz_tests COMMAND ftviz_tests)
@@ -311,7 +388,7 @@ if(FTVIZ_BUILD_TESTS)
   # (exit 77) where no OpenGL 4.5 context is available.
   if(FTVIZ_BUILD_APP)
     add_executable(ftviz_render_tests tests/test_render.cpp)
-    ftviz_target_defaults(ftviz_render_tests)
+    ftviz_executable_defaults(ftviz_render_tests)
     target_link_libraries(ftviz_render_tests PRIVATE ftviz_app)
     target_compile_definitions(ftviz_render_tests PRIVATE FTVIZ_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
     add_test(NAME ftviz_render_tests COMMAND ftviz_render_tests)

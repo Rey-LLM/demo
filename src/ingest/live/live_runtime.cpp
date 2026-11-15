@@ -25,6 +25,8 @@ LiveFeeds::LiveFeeds(const FeedsConfig& cfg, const FeedHubs& hubs, std::size_t r
     c.ring = &ring_;
     c.transitions = &transitions_[i];
     c.status = &status_[i];
+    c.all_status = &status_;
+    c.fx = &fx_;
   }
 }
 
@@ -89,6 +91,23 @@ void ModelThread::push_visual(const WhaleRecord& w, float startS) noexcept {
   if (!visual_.try_push(v)) visual_drops_.fetch_add(1, std::memory_order_relaxed);
 }
 
+void ModelThread::maybe_trail(const LiveEvent& e, std::int64_t clockMs, float startS) noexcept {
+  const LiveModelConfig& c = model_.config();
+  if (c.trail_max_per_s <= 0.0 || e.src_hub == e.dst_hub || !(e.usd_value >= c.trail_min_usd)) return;
+  if (e.kind != EventKind::Trade && e.kind != EventKind::Transaction) return;
+  if (trail_last_ms_ < 0 || clockMs < trail_last_ms_) trail_last_ms_ = clockMs;
+  trail_tokens_ = std::min(c.trail_max_per_s * 0.5,  // burst: half a second's worth
+                           trail_tokens_ + static_cast<double>(clockMs - trail_last_ms_) * 1e-3 * c.trail_max_per_s);
+  trail_last_ms_ = clockMs;
+  if (trail_tokens_ < 1.0) return;
+  trail_tokens_ -= 1.0;
+  WhaleRecord w;
+  w.src_hub = e.src_hub;
+  w.dst_hub = e.dst_hub;
+  w.tier = 0;
+  push_visual(w, startS);
+}
+
 void ModelThread::step_live(std::int64_t nowMs) noexcept {
   if (nowMs < clock_ms_) nowMs = clock_ms_;
   clock_ms_ = nowMs;
@@ -107,7 +126,11 @@ void ModelThread::step_live(std::int64_t nowMs) noexcept {
     LiveEvent e;
     WhaleRecord w;
     for (int i = 0; i < 32768 && feeds_->events().try_pop(e); ++i) {
-      if (model_.apply(e, nowMs, &w)) push_visual(w, -1.0f);
+      if (model_.apply(e, nowMs, &w)) {
+        push_visual(w, -1.0f);
+      } else {
+        maybe_trail(e, nowMs, -1.0f);
+      }
     }
   }
   fallback_any_.store(anyReplay, std::memory_order_relaxed);
@@ -130,7 +153,11 @@ void ModelThread::step_live(std::int64_t nowMs) noexcept {
           LiveEvent e = src;
           e.ts_ms = nowMs;
           e.label = SourceLabel::Replay;
-          if (model_.apply(e, nowMs, &w)) push_visual(w, -1.0f);
+          if (model_.apply(e, nowMs, &w)) {
+            push_visual(w, -1.0f);
+          } else {
+            maybe_trail(e, nowMs, -1.0f);
+          }
         }
         ++fb_cursor_;
       }
@@ -154,7 +181,13 @@ void ModelThread::step_replay(std::int64_t dtMs) noexcept {
     std::int64_t expected = seek;  // a newer request made meanwhile stays pending
     seek_ms_.compare_exchange_strong(expected, -1, std::memory_order_relaxed);
   }
-  driver_->advance_to(model_, driver_->position_ms() + dtMs, [this](const WhaleRecord& w, double relS) { push_visual(w, static_cast<float>(relS)); });
+  driver_->advance_to(model_, driver_->position_ms() + dtMs, [this](const LiveEvent& e, const WhaleRecord* w, double relS) {
+    if (w) {
+      push_visual(*w, static_cast<float>(relS));
+    } else {
+      maybe_trail(e, e.ts_ms, static_cast<float>(relS));
+    }
+  });
   clock_ms_ = capture_->t0_ms + driver_->position_ms();
   timeline_ms_.store(driver_->loop_position_ms(), std::memory_order_relaxed);
   position_ms_.store(driver_->position_ms(), std::memory_order_relaxed);

@@ -123,10 +123,23 @@ ParseResult parse_coinbase(JsonParser& p, const char* msg, std::size_t len, cons
 ParseResult parse_kraken(JsonParser& p, const char* msg, std::size_t len, const ParseContext& ctx, EventBatch& out,
                          PriceBook* prices);
 
+// Binance combined stream (wss://.../stream?streams=btcusdt@aggTrade/...):
+// {"stream":"btcusdt@aggTrade","data":{"e":"aggTrade","s":"BTCUSDT","p":..,"q":..,"T":..,"m":..}}
+// and bare aggTrade / trade objects from a single-stream connection.
+ParseResult parse_binance(JsonParser& p, const char* msg, std::size_t len, const ParseContext& ctx, EventBatch& out,
+                          PriceBook* prices);
+// ECB reference rates via Frankfurter (GET /v1/latest?base=USD&symbols=...):
+// {"amount":1.0,"base":"USD","date":"2026-11-13","rates":{"EUR":0.93,...}}.
+// Fills `board` (USD per unit) and seeds `prices` for currencies that have
+// no exchange-implied rate from the last two minutes. r.block_number = date as YYYYMMDD.
+ParseResult parse_ecb_rates(JsonParser& p, const char* msg, std::size_t len, const ParseContext& ctx,
+                            PriceBook* prices, FxBoard* board);
+
 // Helpers shared with the tests.
 bool parse_hex_u64(std::string_view s, std::uint64_t& out) noexcept;       // "0x1b4"
 double hex_to_double(std::string_view s) noexcept;                          // big "0x..." values (wei)
 bool split_pair(std::string_view symbol, Asset& base, Asset& quote) noexcept;  // "BTC-USD", "BTC/USD"
+bool split_concat_pair(std::string_view symbol, Asset& base, Asset& quote) noexcept;  // "BTCUSDT", "ethusdt"
 bool asset_from_code(std::string_view code, Asset& out) noexcept;
 
 }  // namespace ftv

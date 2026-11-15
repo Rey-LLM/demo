@@ -86,3 +86,7 @@ ftviz_export_*/
 # Local build directories
 b-*/
 cmake-build-*/
+
+# build.bat output
+dist/
+vcpkg/

@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <thread>
 
+#include "core/embedded_fs.hpp"
 #include "core/log.hpp"
 #include "ingest/live/net.hpp"
 #include "render/renderer.hpp"
@@ -23,13 +24,19 @@ namespace {
 
 namespace fs = std::filesystem;
 
+// A path from feeds.json: absolute or embedded as given; relative ones
+// against the directory of an on-disk feeds.json, then the working
+// directory, then the copy compiled into the binary.
 std::string resolve(const std::string& base, const std::string& rel) {
-  if (rel.empty() || fs::path(rel).is_absolute()) return rel;
+  if (rel.empty() || is_embedded_path(rel) || fs::path(rel).is_absolute()) return rel;
   std::error_code ec;
-  const fs::path a = fs::path(base) / rel;
-  if (fs::exists(a, ec)) return a.string();
-  if (fs::exists(rel, ec)) return rel;
-  return a.string();
+  if (!base.empty() && !is_embedded_path(base)) {
+    const fs::path a = fs::path(base) / rel;
+    if (fs::exists(a, ec)) return a.string();
+    if (fs::exists(rel, ec)) return rel;
+  }
+  if (find_embedded(rel)) return embedded_path(rel);
+  return (fs::path(base) / rel).string();
 }
 
 }  // namespace
@@ -169,12 +176,18 @@ void LiveSession::finish_export() {
   pinned_ = nullptr;
 }
 
+static_assert(std::tuple_size_v<decltype(LiveSession::SlotStates{})> == Renderer::kLiveArcSlots);
+
 void LiveSession::pump_visuals(Renderer& renderer, float liveClock) noexcept {
   const std::uint32_t gen = model_->seek_generation();
   if (gen != seek_seen_) {
     seek_seen_ = gen;
     renderer.clear_live_arcs();
+    slots_.fill(SlotState{});
   }
+  // Slot choice: the next free (finished) slot; when none is free a whale
+  // evicts a flow trail (else the oldest slot), and a flow trail is dropped.
+  const float span = whale_span_s_;
   VisualEvent v;
   while (model_->visuals().try_pop(v)) {
     LiveArcSlot slot;
@@ -183,8 +196,25 @@ void LiveSession::pump_visuals(Renderer& renderer, float liveClock) noexcept {
     slot.tier = v.tier;
     slot.used = 1;
     slot.start = v.start_s >= 0.0f ? v.start_s : liveClock;
-    renderer.set_live_arc(next_slot_, slot);
-    next_slot_ = (next_slot_ + 1) % Renderer::kLiveArcSlots;
+    constexpr std::uint32_t N = Renderer::kLiveArcSlots;
+    std::uint32_t pick = N, trail = N, oldest = next_slot_;
+    for (std::uint32_t k = 0; k < N; ++k) {
+      const std::uint32_t i = (next_slot_ + k) % N;
+      const SlotState& s = slots_[i];
+      if (!s.used || liveClock - s.start >= span || s.start - liveClock > span) {
+        pick = i;
+        break;
+      }
+      if (trail == N && s.tier == 0) trail = i;
+      if (s.start < slots_[oldest].start) oldest = i;
+    }
+    if (pick == N) {
+      if (v.tier == 0) continue;  // busy: a trail is not worth a whale's slot
+      pick = trail != N ? trail : oldest;
+    }
+    slots_[pick] = SlotState{slot.start, static_cast<std::uint8_t>(v.tier), true};
+    renderer.set_live_arc(pick, slot);
+    next_slot_ = (pick + 1) % N;
   }
 }
 

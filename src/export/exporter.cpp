@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <system_error>
+#include <thread>
 
 namespace ftv {
 
@@ -91,6 +92,7 @@ std::string_view feed_chain(FeedId f, Asset a) {
   switch (f) {
     case FeedId::Coinbase: return "COINBASE";
     case FeedId::Kraken: return "KRAKEN";
+    case FeedId::Binance: return "BINANCE";
     case FeedId::Fiat: return "FIAT";
     default: return asset_name(a);
   }
@@ -368,6 +370,16 @@ bool write_file_atomic(const std::string& path, const std::string& text, std::st
   }
   std::error_code ec;
   fs::rename(tmp, path, ec);  // atomic replace on POSIX; replaces an existing file on Windows too
+#if defined(_WIN32)
+  // Windows refuses to replace a file that another process (a spreadsheet,
+  // a viewer polling the export) has open without FILE_SHARE_DELETE. Such
+  // readers come and go, so retry for up to ~2 s before giving up.
+  for (int attempt = 0; ec && attempt < 400; ++attempt) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    ec.clear();
+    fs::rename(tmp, path, ec);
+  }
+#endif
   if (ec) {
     error = "cannot rename " + tmp + ": " + ec.message();
     fs::remove(tmp, ec);

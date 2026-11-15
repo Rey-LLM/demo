@@ -27,15 +27,21 @@ bool parse_float(std::string_view s, float& out) {
 
 void print_usage(const char* argv0) {
   std::printf(
-      "Usage: %s --input <transactions.csv|.ftxb> [options]\n"
+      "Usage: %s [--input <transactions.csv|.ftxb>] [options]\n"
+      "\n"
+      "With no options ftviz opens the globe and connects to every public feed in the\n"
+      "embedded config/feeds.json. Shaders, config, coastlines and the replay capture are\n"
+      "compiled into the binary; the options below only override them.\n"
       "\n"
       "Input / configuration\n"
-      "  --input PATH           CSV with header or packed .ftxb file (required; alias --dataset)\n"
+      "  --input PATH           CSV with header or packed .ftxb file drawn as an entity graph\n"
+      "                         (optional; alias --dataset, or pass the path as the only argument)\n"
       "  --format auto|csv|ftxb input format (default: auto-detect)\n"
-      "  --hubs PATH            hub taxonomy (default: config/hubs.json next to the binary)\n"
-      "  --render PATH          render settings (default: config/render.json next to the binary)\n"
-      "  --theme PATH           palette and styling (default: config/theme.json next to the binary)\n"
-      "  --shaders DIR          GLSL directory (default: shaders/ next to the binary)\n"
+      "  --data-dir DIR         read shaders/, config/ and assets/ from DIR instead of the binary\n"
+      "  --hubs PATH            hub taxonomy (default: embedded config/hubs.json)\n"
+      "  --render PATH          render settings (default: embedded config/render.json)\n"
+      "  --theme PATH           palette and styling (default: embedded config/theme.json)\n"
+      "  --shaders DIR          GLSL directory (default: embedded shaders/)\n"
       "\n"
       "Threads / ingest\n"
       "  --threads N            layout/merge threads incl. the coordinator (default: all cores headless,\n"
@@ -45,10 +51,11 @@ void print_usage(const char* argv0) {
       "  --log-malformed K      print the first K malformed row offsets (default 8, max 16)\n"
       "\n"
       "Live data\n"
-      "  --live                 start the public feed adapters (config/feeds.json); a feed that is\n"
-      "                         OFFLINE or RATE_LIMITED for 15 s falls back to REPLAY of the capture\n"
-      "  --replay [FILE.ftxcap] play a capture on its timeline (default: assets/replay/default.ftxcap)\n"
-      "  --feeds PATH           feed configuration (default: config/feeds.json next to the binary)\n"
+      "  --live                 connect to the public feeds (the default); when no feed has been\n"
+      "                         LIVE for 15 s (machine offline) the bundled capture plays as REPLAY\n"
+      "  --no-live              no feed connections: only the MODELED fiat corridors (and --input)\n"
+      "  --replay [FILE.ftxcap] play a capture on its timeline (default: the embedded synthetic one)\n"
+      "  --feeds PATH           feed configuration (default: embedded config/feeds.json)\n"
       "  --export DIR           directory for exports (E key / EXPORT button; default: current directory)\n"
       "  --export-after S       write one export S seconds after start, then exit\n"
       "  --pin HUB_ID           start with that hub's panel pinned\n"
@@ -139,6 +146,8 @@ bool parse_cli(int argc, char** argv, CliOptions& o, std::string& error) {
         error = "unknown --format (expected auto, csv or ftxb)";
         return false;
       }
+    } else if (a == "--data-dir") {
+      if (!str(o.data_dir)) return false;
     } else if (a == "--hubs") {
       if (!str(o.hubs_path)) return false;
     } else if (a == "--render") {
@@ -224,6 +233,9 @@ bool parse_cli(int argc, char** argv, CliOptions& o, std::string& error) {
       o.cam_distance = vals[2];
     } else if (a == "--live") {
       o.live = true;
+      o.live_explicit = true;
+    } else if (a == "--no-live") {
+      o.live = false;
     } else if (a == "--replay") {
       o.replay = true;
       if (i + 1 < argc && argv[i + 1][0] != '-' && std::string_view(argv[i + 1]).ends_with(".ftxcap")) {
@@ -261,14 +273,15 @@ bool parse_cli(int argc, char** argv, CliOptions& o, std::string& error) {
       return false;
     }
   }
-  if (!o.help && o.input.empty()) {
-    error = "--input is required";
+  if (o.headless && o.input.empty()) {
+    error = "--headless needs --input";
     return false;
   }
-  if (o.live && o.replay) {
+  if (o.live_explicit && o.replay) {
     error = "--live and --replay are mutually exclusive";
     return false;
   }
+  if (o.replay) o.live = false;
   if (o.width < 0 || o.height < 0 || o.width > 16384 || o.height > 16384) {
     error = "invalid window size";
     return false;

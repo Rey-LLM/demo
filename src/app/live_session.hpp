@@ -3,6 +3,7 @@
 // capture, the feed adapters (--live), the model thread and the exporter.
 // Shared by the interactive viewer and the screenshot mode.
 
+#include <array>
 #include <memory>
 #include <string>
 
@@ -46,6 +47,7 @@ class LiveSession {
   // Render thread: moves pending VisualEvents into the renderer's live arc
   // slots (round robin over the fixed slots; never allocates).
   void pump_visuals(Renderer& renderer, float liveClock) noexcept;
+  void set_arc_lifetime(float seconds) noexcept { whale_span_s_ = seconds; }
 
   // Prints one line per feed (state, label, counters) to stdout.
   void print_feed_report() const;
@@ -66,6 +68,18 @@ class LiveSession {
   std::unique_ptr<ExportService> exporter_;
   const LiveSnapshot* pinned_ = nullptr;  // exporter thread
   bool gate_held_ = false;
+  struct SlotState {
+    float start = 0.0f;
+    std::uint8_t tier = 0;
+    bool used = false;
+  };
+
+ public:
+  using SlotStates = std::array<SlotState, 256>;  // one per Renderer::kLiveArcSlots (checked in the .cpp)
+
+ private:
+  SlotStates slots_{};
+  float whale_span_s_ = 2.1f;            // flight + flash (theme), set by the viewer
   std::uint32_t next_slot_ = 0;
   std::uint32_t seek_seen_ = 0;
 };

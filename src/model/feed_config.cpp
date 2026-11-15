@@ -42,6 +42,14 @@ std::optional<FeedsConfig> load_feeds_config(const std::string& path, const HubT
   c.max_frame_bytes = static_cast<std::size_t>(std::clamp(root->number_or("max_frame_bytes", 8388608.0), 4096.0, 67108864.0));
   c.backoff_base_s = std::clamp(root->number_or("backoff_base_s", 0.5), 0.05, 60.0);
   c.backoff_cap_s = std::clamp(root->number_or("backoff_cap_s", 30.0), c.backoff_base_s, 600.0);
+  const std::string policy = root->string_or("fallback_policy", "all_offline");
+  if (policy != "all_offline" && policy != "per_feed") {
+    error = path + ": fallback_policy must be \"all_offline\" or \"per_feed\"";
+    return std::nullopt;
+  }
+  c.fallback_per_feed = policy == "per_feed";
+  c.trail_min_usd = std::clamp(root->number_or("trail_min_usd", c.trail_min_usd), 0.0, 1e12);
+  c.trail_max_per_s = std::clamp(root->number_or("trail_max_per_s", c.trail_max_per_s), 0.0, 200.0);
   c.replay_capture = root->string_or("replay_capture", c.replay_capture);
 
   auto hub = [&](const std::string& id, std::uint16_t& out) {
@@ -103,6 +111,10 @@ std::optional<FeedsConfig> load_feeds_config(const std::string& path, const HubT
         return std::nullopt;
       }
       fc.url = f.string_or("url", "");
+      if (const JsonValue* fb = f.find("fallback_urls")) {
+        for (const JsonValue& u : fb->items()) fc.fallback_urls.push_back(u.as_string());
+      }
+      fc.poll_s = std::clamp(f.number_or("poll_s", fc.poll_s), 60.0, 86400.0);
       fc.rpc_url = f.string_or("rpc_url", "");
       fc.docs = f.string_or("docs", "");
       if (const JsonValue* sub = f.find("subscribe")) {
@@ -113,8 +125,12 @@ std::optional<FeedsConfig> load_feeds_config(const std::string& path, const HubT
       fc.slot_lag = static_cast<std::uint32_t>(std::clamp(f.number_or("slot_lag", 32.0), 0.0, 10000.0));
       fc.sample_cap = static_cast<std::uint32_t>(std::clamp(f.number_or("sample_cap", 32.0), 1.0, 4096.0));
       fc.whale_usd = std::max(0.0, f.number_or("whale_usd", 0.0));
-      if (fc.url.rfind("wss://", 0) != 0 || (!fc.rpc_url.empty() && fc.rpc_url.rfind("https://", 0) != 0)) {
-        error = path + ": feed " + id + " must use wss:// (and https:// for rpc_url): TLS is mandatory";
+      // TLS is mandatory: wss:// for streams, https:// for the FX poller and rpc_url.
+      const char* scheme = idx == static_cast<std::size_t>(FeedId::Fx) ? "https://" : "wss://";
+      bool tlsOk = fc.url.rfind(scheme, 0) == 0 && (fc.rpc_url.empty() || fc.rpc_url.rfind("https://", 0) == 0);
+      for (const std::string& u : fc.fallback_urls) tlsOk = tlsOk && u.rfind(scheme, 0) == 0;
+      if (!tlsOk) {
+        error = path + ": feed " + id + " must use " + scheme + " URLs (and https:// for rpc_url): TLS is mandatory";
         return std::nullopt;
       }
     }
@@ -135,6 +151,8 @@ LiveModelConfig make_model_config(const FeedsConfig& feeds, const HubTaxonomy& t
   for (std::size_t i = 0; i < kFeedCount; ++i) m.whale_usd[i] = feeds.feeds[i].whale_usd;
   m.corridors = std::move(corridors);
   m.fiat_enabled = feeds.fiat_enabled;
+  m.trail_min_usd = feeds.trail_min_usd;
+  m.trail_max_per_s = feeds.trail_max_per_s;
   return m;
 }
 

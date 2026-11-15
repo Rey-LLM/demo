@@ -113,6 +113,11 @@ std::optional<Theme> theme_from_json(const JsonValue& root, std::string& error) 
   if (!color(grat, "color", t.graticule, "graticule")) return std::nullopt;
   if (!color(ink, "color", t.ink, "ink")) return std::nullopt;
   if (!color(whale, "color", t.whale, "whale")) return std::nullopt;
+  if (whale && whale->find("color_hot")) {
+    if (!color(whale, "color_hot", t.whale_hot, "whale hot")) return std::nullopt;
+  } else {
+    for (int i = 0; i < 3; ++i) t.whale_hot[i] = t.whale[i];  // one colour for every tier
+  }
 
   t.graticule_alpha = num(*grat, "alpha", t.graticule_alpha, 0.06f, 0.10f);
   t.graticule_spacing_deg = num(*grat, "spacing_deg", t.graticule_spacing_deg, 1.0f, 90.0f);

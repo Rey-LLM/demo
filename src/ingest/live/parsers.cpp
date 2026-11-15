@@ -108,6 +108,25 @@ bool split_pair(std::string_view symbol, Asset& base, Asset& quote) noexcept {
   return asset_from_code(symbol.substr(0, sep), base) && asset_from_code(symbol.substr(sep + 1), quote);
 }
 
+bool split_concat_pair(std::string_view symbol, Asset& base, Asset& quote) noexcept {
+  char up[16];
+  if (symbol.size() < 6 || symbol.size() > sizeof(up)) return false;
+  for (std::size_t i = 0; i < symbol.size(); ++i) {
+    char c = symbol[i];
+    if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+    up[i] = c;
+  }
+  const std::string_view s(up, symbol.size());
+  // Longest quote first: "USDT" before "USD".
+  static constexpr std::string_view kQuotes[] = {"USDT", "USD", "EUR", "GBP", "JPY"};
+  for (std::string_view q : kQuotes) {
+    if (s.size() > q.size() && s.substr(s.size() - q.size()) == q) {
+      return asset_from_code(s.substr(0, s.size() - q.size()), base) && asset_from_code(q, quote);
+    }
+  }
+  return false;
+}
+
 namespace {
 
 bool to_double(std::string_view s, double& out) noexcept {
@@ -649,7 +668,9 @@ void finish_trade(LiveEvent& e, Asset base, Asset quote, const ParseContext& ctx
     e.usd_value = e.amount * e.price;
     if (prices) prices->set(base, e.price, e.ts_ms);
   } else {
-    const double q = ctx.prices ? ctx.prices->usd(quote) : 0.0;  // fiat quotes need FX: unknown here
+    // Fiat quotes need FX (exchange cross rates, else the ECB reference
+    // rate); USDT is valued with Kraken's USDT/USD ticker or at par.
+    const double q = ctx.prices ? ctx.prices->usd(quote) : 0.0;
     if (q > 0.0) {
       e.usd_value = e.amount * e.price * q;
     } else {
@@ -815,6 +836,174 @@ ParseResult parse_kraken(JsonParser& p, const char* msg, std::size_t len, const 
     return r;
   }
   return {ParseStatus::Ignored};
+}
+
+// ---------------------------------------------------------------------------
+// Binance: combined stream envelope around aggTrade / trade payloads.
+
+ParseResult parse_binance(JsonParser& p, const char* msg, std::size_t len, const ParseContext& ctx, EventBatch& out,
+                          PriceBook* prices) {
+  ParseResult r;
+  od::document doc;
+  od::object root;
+  if (!open(p, msg, len, root, doc)) return {ParseStatus::Malformed};
+  std::string_view ev, symbol, message;
+  double price = 0.0, qty = 0.0;
+  bool havePrice = false, haveQty = false, buyerMaker = false, haveId = false;
+  std::int64_t tradeMs = 0, code = 0, id = 0;
+  bool haveCode = false;
+  // Fields of the payload object, which is either the root or root["data"].
+  auto read_fields = [&](od::object& o) -> bool {
+    for (auto f : o) {
+      std::string_view k;
+      if (f.unescaped_key().get(k)) return false;
+      if (k == "e") {
+        ignore(f.value().get_string().get(ev));
+      } else if (k == "s") {
+        ignore(f.value().get_string().get(symbol));
+      } else if (k == "p") {
+        havePrice = get_number(f.value(), price);
+      } else if (k == "q") {
+        haveQty = get_number(f.value(), qty);
+      } else if (k == "T") {
+        get_int(f.value(), tradeMs);
+      } else if (k == "m") {
+        ignore(f.value().get_bool().get(buyerMaker));
+      } else if (k == "a" || k == "t") {
+        haveId = get_int(f.value(), id);
+      } else if (k == "data") {
+        od::object d;
+        if (f.value().get_object().get(d)) return false;
+        for (auto g : d) {
+          std::string_view gk;
+          if (g.unescaped_key().get(gk)) return false;
+          if (gk == "e") {
+            ignore(g.value().get_string().get(ev));
+          } else if (gk == "s") {
+            ignore(g.value().get_string().get(symbol));
+          } else if (gk == "p") {
+            havePrice = get_number(g.value(), price);
+          } else if (gk == "q") {
+            haveQty = get_number(g.value(), qty);
+          } else if (gk == "T") {
+            get_int(g.value(), tradeMs);
+          } else if (gk == "m") {
+            ignore(g.value().get_bool().get(buyerMaker));
+          } else if (gk == "a" || gk == "t") {
+            haveId = get_int(g.value(), id);
+          }
+        }
+      } else if (k == "code") {
+        haveCode = get_int(f.value(), code);
+      } else if (k == "msg") {
+        ignore(f.value().get_string().get(message));
+      }
+    }
+    return true;
+  };
+  if (!read_fields(root)) return {ParseStatus::Malformed};
+  if (haveCode) {
+    // {"code": 429 / -1003 "Too many requests", "msg": ...}
+    r.status = (code == 429 || code == -1003 || contains_ci(message, "too many")) ? ParseStatus::RateLimited
+                                                                                    : ParseStatus::Rejected;
+    return r;
+  }
+  if (ev.empty()) return r;  // acknowledgement or other control message
+  if (ev != "aggTrade" && ev != "trade") return {ParseStatus::Ignored};
+  Asset base, quote;
+  if (!havePrice || !haveQty || !split_concat_pair(symbol, base, quote) || static_cast<std::size_t>(base) >= 3) {
+    return {ParseStatus::Malformed};
+  }
+  LiveEvent e = make_event(FeedId::Binance, ctx, EventKind::Trade, base);
+  if (tradeMs > 0) e.ts_ms = tradeMs;
+  e.amount = qty;
+  e.price = price;
+  e.id_hash = haveId ? static_cast<std::uint64_t>(id) : 0;
+  // "m": the buyer is the market maker, so the taker sold.
+  const bool buy = !buyerMaker;
+  if (buy) e.flags |= kEvBuy;
+  trade_hubs(e, base, quote, buy, ctx);
+  finish_trade(e, base, quote, ctx, quote == Asset::USD ? prices : nullptr);
+  // A USDT price is a USD price at the current USDT/USD rate: seed the book
+  // only when Coinbase or Kraken have not set it in the last two minutes.
+  if (quote == Asset::USDT && prices && e.usd_value > 0.0 && e.amount > 0.0 &&
+      ctx.recv_ms - prices->updated_ms(base) > 120000) {
+    prices->set(base, e.usd_value / e.amount, e.ts_ms);
+  }
+  out.push(e);
+  return r;
+}
+
+// ---------------------------------------------------------------------------
+// ECB reference rates (Frankfurter).
+
+ParseResult parse_ecb_rates(JsonParser& p, const char* msg, std::size_t len, const ParseContext& ctx,
+                            PriceBook* prices, FxBoard* board) {
+  ParseResult r;
+  od::document doc;
+  od::object root;
+  if (!open(p, msg, len, root, doc)) return {ParseStatus::Malformed};
+  std::string_view base, date, message;
+  double amount = 1.0;
+  struct Rate {
+    Asset a;
+    double per_usd;
+  };
+  Rate rates[kAssetCount];
+  std::size_t n = 0;
+  bool haveRates = false;
+  for (auto f : root) {
+    std::string_view k;
+    if (f.unescaped_key().get(k)) return {ParseStatus::Malformed};
+    if (k == "base") {
+      ignore(f.value().get_string().get(base));
+    } else if (k == "date") {
+      ignore(f.value().get_string().get(date));
+    } else if (k == "amount") {
+      get_number(f.value(), amount);
+    } else if (k == "message" || k == "error") {
+      ignore(f.value().get_string().get(message));
+    } else if (k == "rates") {
+      od::object o;
+      if (f.value().get_object().get(o)) return {ParseStatus::Malformed};
+      haveRates = true;
+      for (auto g : o) {
+        std::string_view code;
+        if (g.unescaped_key().get(code)) return {ParseStatus::Malformed};
+        double v = 0.0;
+        Asset a;
+        if (!get_number(g.value(), v) || !asset_from_code(code, a)) continue;
+        if (v > 0.0 && n < kAssetCount) rates[n++] = Rate{a, v};
+      }
+    }
+  }
+  if (!haveRates) {
+    if (!message.empty()) {
+      r.status = contains_ci(message, "rate limit") || contains_ci(message, "too many") ? ParseStatus::RateLimited
+                                                                                       : ParseStatus::Rejected;
+      return r;
+    }
+    return {ParseStatus::Malformed};
+  }
+  if (base != "USD" || !(amount > 0.0) || date.size() != 10) return {ParseStatus::Malformed};
+  std::uint32_t ymd = 0;
+  for (char c : date) {
+    if (c == '-') continue;
+    if (c < '0' || c > '9') return {ParseStatus::Malformed};
+    ymd = ymd * 10u + static_cast<std::uint32_t>(c - '0');
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const double usdPerUnit = amount / rates[i].per_usd;
+    if (board) board->set(rates[i].a, usdPerUnit);
+    // Exchange-implied cross rates are fresher; the daily reference rate
+    // only fills in currencies without one from the last two minutes.
+    if (prices && ctx.recv_ms - prices->updated_ms(rates[i].a) > 120000) {
+      prices->set(rates[i].a, usdPerUnit, ctx.recv_ms);
+    }
+  }
+  if (board) board->set_date(ymd, ctx.recv_ms);
+  r.block_number = ymd;
+  return r;
 }
 
 }  // namespace ftv

@@ -48,6 +48,10 @@ struct LiveModelConfig {
   std::size_t whale_capacity = 1u << 17;
   std::size_t volume_capacity = 1u << 20;      // (feed, label, second) rows
   std::size_t transition_capacity = 256;       // per feed
+  // Flow trails: hub-to-hub events below the whale threshold that still get
+  // a (dim, deep-amber) arc. Visual only; not part of model_config_hash.
+  double trail_min_usd = 2500.0;
+  double trail_max_per_s = 40.0;
 };
 
 struct WhaleRecord {
@@ -112,6 +116,10 @@ struct LiveSnapshot {
   std::uint64_t whale_overflow = 0;
   std::uint64_t volume_overflow = 0;
   std::uint64_t checksum = 0;
+  // The HUD's whale tape: the newest whales, newest first.
+  static constexpr std::size_t kTapeLength = 8;
+  std::array<WhaleRecord, kTapeLength> tape{};
+  std::size_t tape_count = 0;
 };
 
 class LiveModel {
