@@ -1,0 +1,60 @@
+#version 450 core
+// GPU edge culling + compaction (Pass 3 producer). One thread per edge.
+// Intra-hub edges occupy [0, u_intra_count) sorted by priority (weight)
+// descending, inter-hub edges follow. Survivors are appended to compact lists
+// and the instance counts of two DrawArraysIndirect commands are bumped with
+// atomics, so the CPU never touches per-edge data at runtime.
+layout(local_size_x = 256) in;
+
+#include "common.glsl"
+
+struct Edge {
+  uint src;
+  uint dst;
+  uint attr;
+  float weight;
+};
+layout(std430, binding = 1) readonly buffer Edges { Edge edges[]; };
+layout(std430, binding = 5) writeonly buffer VisibleIntra { uint vis_intra[]; };
+layout(std430, binding = 6) writeonly buffer VisibleInter { uint vis_inter[]; };
+struct DrawCmd {
+  uint count;
+  uint instanceCount;
+  uint first;
+  uint baseInstance;
+};
+layout(std430, binding = 7) buffer Indirect { DrawCmd cmds[2]; };
+
+uniform uint u_edge_count;
+uniform uint u_intra_count;
+uniform uint u_intra_lod;   // number of intra edges allowed by the weight percentile / budget
+uniform uint u_inter_lod;
+uniform uint u_intra_cap;   // capacity of vis_intra
+uniform uint u_inter_cap;
+uniform uint u_detail;      // E key: individual inter-hub edges near the camera
+
+void main() {
+  uint e = gl_GlobalInvocationID.x;
+  if (e >= u_edge_count) return;
+  Edge ed = edges[e];
+  uint selected = u_counts.y;  // node + 1, 0 = none
+  bool sel = selected != 0u && (ed.src + 1u == selected || ed.dst + 1u == selected);
+  vec3 a = node_position(ed.src);
+  vec3 b = node_position(ed.dst);
+  if (e < u_intra_count) {
+    if (!sel) {
+      if (e >= u_intra_lod) return;
+      if (segment_outside(u_view_proj * vec4(a, 1.0), u_view_proj * vec4(b, 1.0))) return;
+    }
+    uint slot = atomicAdd(cmds[0].instanceCount, 1u);
+    if (slot < u_intra_cap) vis_intra[slot] = e;
+  } else {
+    if (!sel) {
+      if (u_detail == 0u || (e - u_intra_count) >= u_inter_lod) return;
+      float d = min(distance(u_camera.xyz, a), distance(u_camera.xyz, b));
+      if (d > u_params1.x) return;
+    }
+    uint slot = atomicAdd(cmds[1].instanceCount, 1u);
+    if (slot < u_inter_cap) vis_inter[slot] = e;
+  }
+}

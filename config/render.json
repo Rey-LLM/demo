@@ -1,0 +1,30 @@
+{
+  // Window / swap chain
+  "window_width": 1920,
+  "window_height": 1080,
+  "vsync": false,
+  "msaa_samples": 4,
+
+  // Edge budget and LOD
+  "max_visible_edges": 2000000,
+  "intra_edge_lod_percentile": 0.0,
+  "max_inter_hub_edges": 250000,
+  "inter_hub_detail_distance": 900.0,
+  "gpu_culling": true,
+
+  // Appearance
+  "background": [0.015, 0.018, 0.03],
+  "node_size_scale": 1.0,
+  "edge_alpha": 0.10,
+  "inter_edge_alpha": 0.35,
+  "corridor_width_px": 9.0,
+  "hub_particles_per_hub": 1536,
+  "hub_glow_strength": 0.8,
+
+  // Camera
+  "camera_fov_deg": 50.0,
+  "camera_near": 0.5,
+  "camera_damping": 8.0,
+  "camera_start_distance": 3600.0,
+  "camera_start_pitch_deg": 28.0
+}

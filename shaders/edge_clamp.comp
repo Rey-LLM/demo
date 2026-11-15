@@ -1,0 +1,17 @@
+#version 450 core
+// Clamps the indirect instance counts to the compact-list capacities after
+// culling (atomics may overshoot when the budget is exhausted).
+layout(local_size_x = 1) in;
+struct DrawCmd {
+  uint count;
+  uint instanceCount;
+  uint first;
+  uint baseInstance;
+};
+layout(std430, binding = 7) buffer Indirect { DrawCmd cmds[2]; };
+uniform uint u_intra_cap;
+uniform uint u_inter_cap;
+void main() {
+  cmds[0].instanceCount = min(cmds[0].instanceCount, u_intra_cap);
+  cmds[1].instanceCount = min(cmds[1].instanceCount, u_inter_cap);
+}

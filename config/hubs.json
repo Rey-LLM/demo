@@ -1,0 +1,75 @@
+{
+  // Macro-hub taxonomy for ftviz. Hubs without an "anchor" get the default
+  // arrangement: FIAT_CENTER hubs on a ring of radius fiat_ring_radius at y=0,
+  // CHAIN_CLOUD hubs on an elevated ring (y = chain_ring_height), phase-offset
+  // half a fiat step, and the FALLBACK hub below the centre.
+  "layout": {
+    "fiat_ring_radius": 1000,
+    "fiat_phase_deg": 90,
+    "chain_ring_radius": 700,
+    "chain_ring_height": 600,
+    "chain_phase_deg": -1,
+    "fallback_height": -600,
+
+    "theta": 0.8,
+    "leaf_size": 16,
+    "softening": 1.0,
+    "cross_hub_repulsion": 0.05,
+    "fill_fraction": 0.8,
+    "core_gravity_ratio": 0.25,
+    "anchor_inner": 0.6,
+    "anchor_outer": 1.2,
+    "spring_k": 0.004,
+    "spring_rest_base": 10.0,
+    "spring_rest_min": 1.5,
+    "spring_rest_max": 14.0,
+    "inter_hub_spring_scale": 0.1,
+    "damping": 0.85,
+    "dt": 1.0,
+    "initial_temperature": 30.0,
+    "cooling": 0.995,
+    "min_temperature": 0.02,
+    "convergence_epsilon": 0.03,
+    "convergence_window": 30
+  },
+
+  "hubs": [
+    { "id": "NEW_YORK",   "display_name": "New York",   "type": "FIAT_CENTER", "radius": 230, "color": [0.20, 0.85, 0.45, 1.0], "k_anchor": 0.02 },
+    { "id": "LONDON",     "display_name": "London",     "type": "FIAT_CENTER", "radius": 220, "color": [0.30, 0.55, 1.00, 1.0], "k_anchor": 0.02 },
+    { "id": "FRANKFURT",  "display_name": "Frankfurt",  "type": "FIAT_CENTER", "radius": 170, "color": [0.55, 0.45, 1.00, 1.0], "k_anchor": 0.02 },
+    { "id": "ZURICH",     "display_name": "Zurich",     "type": "FIAT_CENTER", "radius": 140, "color": [0.95, 0.35, 0.45, 1.0], "k_anchor": 0.02 },
+    { "id": "TOKYO",      "display_name": "Tokyo",      "type": "FIAT_CENTER", "radius": 210, "color": [1.00, 0.30, 0.25, 1.0], "k_anchor": 0.02 },
+    { "id": "SINGAPORE",  "display_name": "Singapore",  "type": "FIAT_CENTER", "radius": 170, "color": [1.00, 0.65, 0.20, 1.0], "k_anchor": 0.02 },
+    { "id": "HONG_KONG",  "display_name": "Hong Kong",  "type": "FIAT_CENTER", "radius": 160, "color": [0.95, 0.85, 0.25, 1.0], "k_anchor": 0.02 },
+
+    { "id": "BLOCKCHAIN_ETH",  "display_name": "Ethereum", "type": "CHAIN_CLOUD", "chain": "ETH",  "radius": 200, "color": [0.55, 0.60, 1.00, 1.0], "k_anchor": 0.02 },
+    { "id": "BLOCKCHAIN_BTC",  "display_name": "Bitcoin",  "type": "CHAIN_CLOUD", "chain": "BTC",  "radius": 180, "color": [1.00, 0.60, 0.10, 1.0], "k_anchor": 0.02 },
+    { "id": "BLOCKCHAIN_SOL",  "display_name": "Solana",   "type": "CHAIN_CLOUD", "chain": "SOL",  "radius": 160, "color": [0.70, 0.30, 1.00, 1.0], "k_anchor": 0.02 },
+    { "id": "BLOCKCHAIN_TRON", "display_name": "Tron",     "type": "CHAIN_CLOUD", "chain": "TRON", "radius": 150, "color": [1.00, 0.20, 0.30, 1.0], "k_anchor": 0.02 },
+
+    { "id": "OFFSHORE_UNRESOLVED", "display_name": "Offshore / unresolved", "type": "FALLBACK", "radius": 170, "color": [0.62, 0.62, 0.66, 1.0], "k_anchor": 0.02 }
+  ],
+
+  // Jurisdiction -> hub. Unlisted or empty jurisdictions fall back to
+  // OFFSHORE_UNRESOLVED. Region aliases (LATAM, EU, EMEA, APAC) are accepted.
+  "jurisdictions": {
+    "US": "NEW_YORK", "CA": "NEW_YORK", "MX": "NEW_YORK", "BR": "NEW_YORK", "AR": "NEW_YORK",
+    "CL": "NEW_YORK", "CO": "NEW_YORK", "PE": "NEW_YORK", "LATAM": "NEW_YORK", "NA": "NEW_YORK",
+
+    "GB": "LONDON", "IE": "LONDON", "FR": "LONDON", "ES": "LONDON", "PT": "LONDON", "IT": "LONDON",
+    "BE": "LONDON", "SE": "LONDON", "NO": "LONDON", "DK": "LONDON", "FI": "LONDON", "AE": "LONDON",
+    "SA": "LONDON", "ZA": "LONDON", "NG": "LONDON", "EU": "LONDON", "EMEA": "LONDON",
+
+    "DE": "FRANKFURT", "AT": "FRANKFURT", "NL": "FRANKFURT", "LU": "FRANKFURT", "PL": "FRANKFURT",
+    "CZ": "FRANKFURT", "HU": "FRANKFURT",
+
+    "CH": "ZURICH", "LI": "ZURICH", "MC": "ZURICH",
+
+    "JP": "TOKYO", "KR": "TOKYO", "TW": "TOKYO", "APAC": "TOKYO",
+
+    "SG": "SINGAPORE", "MY": "SINGAPORE", "ID": "SINGAPORE", "TH": "SINGAPORE", "VN": "SINGAPORE",
+    "PH": "SINGAPORE", "IN": "SINGAPORE", "AU": "SINGAPORE", "NZ": "SINGAPORE",
+
+    "HK": "HONG_KONG", "CN": "HONG_KONG", "MO": "HONG_KONG"
+  }
+}
