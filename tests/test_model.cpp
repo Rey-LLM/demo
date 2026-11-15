@@ -1,6 +1,7 @@
 // Live model: aggregation, labels, windows, snapshots, captures and seek
 // determinism; plus the pure interaction math (hub picking, view presets).
 
+#include <algorithm>
 #include <cmath>
 #include <string>
 #include <thread>

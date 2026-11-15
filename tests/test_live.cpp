@@ -1,6 +1,7 @@
 // Live ingest: parser fixtures (one per message type), ring stress, reconnect
 // backoff bounds and the feed state machine on an injected clock.
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <fstream>

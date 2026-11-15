@@ -1,5 +1,6 @@
 #include "export/exporter.hpp"
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cstdio>
