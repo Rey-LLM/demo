@@ -149,6 +149,38 @@ TEST_CASE("aggregation: deterministic regardless of thread count and chunking") 
   CHECK_EQ(total, 20000u);
 }
 
+TEST_CASE("whales: per-currency top transactions are identical across threads and chunking") {
+  std::string csv =
+      "tx_id,timestamp_utc,src_account,dst_account,amount,currency,channel,src_jurisdiction,dst_jurisdiction,chain\n";
+  for (int i = 0; i < 20000; ++i) {
+    char line[200];
+    // Amounts repeat (ties broken by time, then endpoints), three currencies.
+    std::snprintf(line, sizeof(line), "W%d,2024-01-01T%02d:%02d:%02dZ,ACC-%d,ACC-%d,%d.00,%s,ACH,US,GB,\n", i,
+                  (i / 3600) % 24, (i / 60) % 60, i % 60, (i * 7) % 997, (i * 13 + 5) % 991, (i * 37) % 9001,
+                  (i % 3 == 0) ? "USD" : (i % 3 == 1) ? "EUR" : "JPY");
+    csv += line;
+  }
+  TempFile f("whales.csv", csv);
+  Loaded one, many;
+  REQUIRE(load(f.path(), 1, 1u << 20, one));
+  REQUIRE(load(f.path(), 4, 4096, many));
+  const auto& a = one.ingest.whales;
+  const auto& b = many.ingest.whales;
+  REQUIRE(a.size() == b.size());
+  CHECK_EQ(a.size(), 3u * 16u);  // 16 per currency
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    CHECK(a[i].amount_minor == b[i].amount_minor);
+    CHECK(a[i].ts_ms == b[i].ts_ms);
+    CHECK(a[i].src == b[i].src);
+    CHECK(a[i].dst == b[i].dst);
+    CHECK(a[i].currency == b[i].currency);
+  }
+  // The largest amount overall is 9000.00 and must be among the whales.
+  bool sawMax = false;
+  for (const auto& w : a) sawMax = sawMax || w.amount_minor == 900000;
+  CHECK(sawMax);
+}
+
 TEST_CASE("aggregation: .ftxb input matches the CSV semantics") {
   // Two records with a shared string pool; second record is malformed.
   std::string pool = "US-AUS-B";

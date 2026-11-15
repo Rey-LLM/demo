@@ -13,5 +13,8 @@ void main() {
   texel.y = clamp(texel.y, 0, kCellH - 1);
   float on = texelFetch(u_font, texel, 0).r;
   if (on < 0.5) discard;
-  o_color = v_color;
+  // HUD colours are sRGB bytes; the target encodes linear -> sRGB on write.
+  vec3 c = v_color.rgb;
+  vec3 lin = mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+  o_color = vec4(lin, v_color.a);
 }

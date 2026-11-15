@@ -25,16 +25,17 @@ deterministic option was taken. Those decisions are collected in
 2. **Model.** Per-worker edge partials are merged in parallel into a sorted
    SoA `EdgeList`. Nodes are assigned to hubs by majority vote, with BRIDGE
    detection. Edges are classified as intra-hub or inter-hub, a CSR
-   adjacency is built, and inter-hub edges are collapsed into corridor
-   bundles keyed by (hub_a, hub_b, currency).
+   adjacency is built. The largest single transactions per currency become
+   whale events on a replay timeline (§6.4).
 3. **Layout.** A deterministic initial placement is followed by iterations
    of a parallel Barnes-Hut force solver. The solver rebuilds a Morton-sorted
    octree every iteration and evaluates repulsion with SIMD kernels per
    interaction group. A dedicated coordinator thread runs it and publishes
    position snapshots through a lock-free triple buffer.
-4. **Render.** The main thread owns the GL context and draws everything with
-   six or seven instanced or indirect draws per frame. Data comes from
-   immutable buffers plus persistently mapped rings guarded by fences.
+4. **Render.** The main thread owns the GL context. It maps the layout onto
+   a globe and draws the scene with six instanced draws per frame (seven
+   with a pick), then an emissive bloom and composite chain. Data comes
+   from immutable buffers plus persistently mapped rings guarded by fences.
 
 ## 2. Threading
 
@@ -47,7 +48,7 @@ deterministic option was taken. Those decisions are collected in
  │ (owns GL)     │   │        │                         │   │  poll input ─► pick readback ─► HUD   │
  └───────────────┘   │        ▼                         │   │  begin_frame: fence wait (slot f-3)   │
                      │  bounded MPMC queue (Vyukov)     │   │    acquire_latest() ◄───────────┐     │
-                     │   │      │      │       │        │   │  draw_frame: 6-7 draws, fence   │     │
+                     │   │      │      │       │        │   │  draw_frame: scene+post, fence  │     │
                      │   ▼      ▼      ▼       ▼        │   └─────────────────────────────────┼─────┘
                      │ T_ingest[0..N-1], N=max(1,hw-2)  │                                     │
                      │ thread-local dedup + partials    │      TripleBuffer<PositionSnapshot> │
@@ -180,28 +181,25 @@ The figures below assume 1M nodes and 7.76M edges.
 
 | Buffer | Binding | Contents | Size |
 |---|---|---|---|
-| Node static VBO | attribute stream, divisor 1 | `{hub u16, flags u16, size f32, color_index u32}`, packed to 12 bytes | 12 MB |
-| Positions | SSBO 0 | Persistent ring, 3 regions of N × 12 bytes | 36 MB |
-| Edges | SSBO 1 | Immutable `{src, dst, attr, weight}`, 16 bytes, intra first then inter, each sorted by priority | 124 MB |
-| Hubs | SSBO 2 | Anchor, radius, colour and params (48 bytes per hub) | < 1 KB |
-| Corridor bundles | SSBO 3 | `{hub_a, hub_b, palette, thickness, brightness}` (32 bytes) | < 8 KB |
+| Node static VBO | attribute stream, divisor 1 | `{hub u16, flags u16, activity f32}`, 8 bytes | 8 MB |
+| Positions | SSBO 0 | Persistent ring, 3 regions of N × 12 bytes (layout space) | 36 MB |
+| Edges | SSBO 1 | Immutable `{src, dst, attr, weight}`, 16 bytes, intra first then inter, each sorted by priority | ≤ 124 MB |
+| Hubs | SSBO 2 | Layout anchor and radius, globe normal and footprint, tangent frame (64 bytes per hub) | < 1 KB |
 | Highlight bits | SSBO 4 | Persistent ring, 3 regions of ⌈N/32⌉ words | 375 KB |
-| Visible lists | SSBO 5 and 6 | Compacted edge indices, capped at 2M in total | 8 MB |
-| Indirect commands | SSBO 7 and `GL_DRAW_INDIRECT_BUFFER` | Two `DrawArraysIndirectCommand` | 32 B |
 | HUD glyphs | SSBO 8 | Persistent ring, one region per frame slot | small |
-| Frame uniforms | UBO 0 | Persistent ring, 3 regions | 3 × 256 B |
-| Palette | texture unit 0 | 256 × 1 RGBA8 `sampler1D` (currencies, then 16 channel colours at 128+) | 1 KB |
-| Font | texture unit 1 | R8 atlas | small |
-| Main target | none | RGBA8 + `DEPTH_COMPONENT32F`, MSAA 4× | 66 MB at 1080p |
+| Hub label glyphs | SSBO 9 | `{hub, code, column, side | length}`, 16 bytes per glyph | < 4 KB |
+| Whale events | SSBO 10 | `{src, dst, src hub, dst hub, start, tier}`, 32 bytes per event | < 16 KB |
+| Frame uniforms | UBO 0 | Persistent ring, 3 regions | 3 × 512 B |
+| Font | texture unit 1 | R8 atlas, 96 glyphs of 6×8 | small |
+| Scene target | none | 2 × RGBA16F + `DEPTH_COMPONENT32F`, MSAA 8× | 332 MB at 1080p |
+| Resolve, bloom and output | none | 2 × RGBA16F, 9 bloom levels, SRGB8_ALPHA8 | ~50 MB at 1080p |
 | Pick target | none | R32UI + depth, plus a persistent PBO | ~16 MB at 1080p |
 
 Edge attributes are packed into 32 bits:
 
 | Bits | Field |
 |---|---|
-| 0–7 | currency palette slot |
-| 8–11 | channel |
-| 12–15 | flags |
+| 0–7 | flags |
 | 16–23 | source hub |
 | 24–31 | destination hub |
 
@@ -402,99 +400,164 @@ three.
 
 ## 6. Rendering
 
-### 6.1 Frame structure and draw budget
+### 6.1 The globe
+
+Nodes are laid out in an abstract layout space (§5) and mapped onto a globe
+of radius R = 1000 only when they are drawn, in the vertex shaders. The CPU
+copy of the same formulas lives in `src/model/globe.hpp`, and
+`shaders/common.glsl` mirrors it line for line.
+
+- **Hub placement.** Every hub has a latitude, longitude and footprint (the
+  angular radius of its disc) in `config/hubs.json`. Fiat centres sit at
+  their city's coordinates. Chain and fallback hubs have no geography, so
+  they are pinned to fixed points in open ocean.
+- **Node placement.** For a node of hub h at layout position p,
+  d = (p − anchor_h) / radius_h. The planar part (d.x, d.z) becomes an
+  offset on the tangent plane at the hub's normal, scaled by the footprint
+  and clamped to 1.6 footprints so strays stay on the disc. d.y becomes a
+  small altitude relief above the surface.
+- **Arcs.** An edge between two nodes is a great circle between their
+  globe positions, lifted by R · `arc_lift` · ω · sin(πt), where ω is the
+  angular separation. Long arcs therefore rise higher than short ones.
+
+### 6.2 Frame structure and draw budget
 
 | Order | Pass | Call |
 |---|---|---|
-| compute | Edge cull and compaction, then clamp | `glDispatchCompute` ×2 (not draws) |
-| 1st | Pass 4: nodes (opaque, so the translucent passes depth-test against them) | `glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, N)` |
-| 2nd | Pass 1: hub clouds | `glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, hubs × P)` |
-| 3rd | Pass 2: corridors (cubic Bézier ribbons, 16 segments) | `glDrawArraysInstanced(TRIANGLE_STRIP, 0, 64, bundles)` |
-| 4th | Pass 3: edges, intra (`LINES`) and inter (8-vertex `LINE_STRIP`) | `glDrawArraysIndirect` ×2 |
-| on click | Pass 5: pick (R32UI) | `glDrawArraysInstanced` |
-| last | Pass 6: HUD | `glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, glyphs)` |
+| 1 | Globe: ray-cast sphere, graticule, limb, depth | `glDrawArrays(GL_TRIANGLES, 0, 3)` |
+| 2 | Nodes: 1–2.5 px discs | `glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, N)` |
+| 3 | Intra-hub arcs | `glDrawArraysInstanced(LINES, 0, 2, intra)` |
+| 4 | Inter-hub arcs, 32 segments each | `glDrawArraysInstanced(LINE_STRIP, 0, 33, inter)` |
+| 5 | Whale arcs and flashes (emissive attachment only) | `glDrawArraysInstanced(TRIANGLE_STRIP, 0, 66, 2W)` |
+| 6 | Hub markers and labels | `glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, H + glyphs)` |
+| on click | Picking (R32UI) | `glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, N)` |
+| post | MSAA resolve | 2 × `glBlitNamedFramebuffer` |
+| post | Bloom: 5 downsamples, 4 upsamples | 9 × `glDrawArrays(GL_TRIANGLES, 0, 3)` |
+| post | Composite, then present | 2 × `glDrawArrays(GL_TRIANGLES, 0, 3)` |
+| post | HUD | `glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, glyphs)` |
 
-A frame makes 6 draws, or 7 when a pick is pending, against a budget of 8.
-There is no `glDrawElements*`, no glBegin, no display list and no
-compatibility profile.
+The scene makes 6 draws every frame, or 7 with a pick pending. The post
+chain makes 12 with the HUD on. The counts do not depend on the graph, the
+camera or the replay clock: a pass with nothing to show still issues its
+draw with zero instances or with every primitive collapsed off-screen.
+There is no `glDrawElements*`, no indirect draw and no compatibility
+profile.
 
-The two edge draws are `glDrawArraysIndirect`. That is the indirect form of
-`glDrawArraysInstanced`, and the compute culling path the spec allows feeds
-it. Without compute (the GL 4.3 fallback), the same passes are issued as
-`glDrawArraysInstanced`, and the vertex shader culls by emitting degenerate
-primitives.
+**Render targets.** The scene renders into an MSAA framebuffer with two
+RGBA16F colour attachments (scene and emissive) and a 32F depth buffer.
+Colour masks keep every pass except the whale pass out of the emissive
+attachment. MSAA is 8× by default and is clamped, with a log line, to
+`GL_MAX_COLOR_TEXTURE_SAMPLES` when the driver offers fewer.
 
-### 6.2 Per-frame CPU work
+**Reverse-Z.** The projection is an infinite reverse-Z perspective, with
+`glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE)`, depth cleared to 0 and
+`GL_GREATER`.
+
+### 6.3 Palette and passes
+
+All colours come from `config/theme.json` as sRGB hex values and are
+converted to linear RGB at load. There are four:
+
+| Name | Value | Used for |
+|---|---|---|
+| Obsidian | `#050608` | Background. Flat, vignette ≤ 3%. |
+| Amber Line | `#C8962E` | Graticule, alpha 0.06–0.10. |
+| Ink | `#D9DCE1` | Nodes, arcs, hub markers, labels, globe limb; alpha 0.04–0.70. |
+| Neon Gold | `#FFC23D` | Whale arcs only, HDR intensity 4–8×. |
+
+The theme loader clamps every alpha and intensity to these ranges. Nothing
+is coloured per hub or per currency.
+
+- **Globe.** A fullscreen triangle ray-casts the sphere and writes its
+  depth, so the far hemisphere occludes nodes and arcs. The graticule is a
+  15° grid drawn analytically: the distance to the nearest grid line,
+  divided by its screen-space derivative, gives the coverage of a 1 px
+  line. Meridians fade out above 75° latitude, and the whole grid fades
+  toward the limb with N·V. A 1 px ink hairline marks the limb, since the
+  globe is as dark as the background.
+- **Nodes.** Discs of 1–2.5 px with analytic edge coverage. Size and alpha
+  follow log(weighted degree), normalised to [0, 1]; alpha uses its
+  square, so most nodes sit near the alpha floor and only the busiest
+  approach 0.6.
+- **Arcs.** 1 px hairlines blended additively into RGBA16F, so overlapping
+  flows read as brightness. Alpha runs from 0.03 to 0.10 for inter-hub arcs
+  and stays below 0.04 for intra-hub chords, which are not drawn at all
+  when the camera is higher than `intra_edge_max_altitude` above the
+  surface. Each inter-hub arc gets a per-edge lift between 0.55 and 1.45 of
+  the base, from a hash of its index, so arcs between the same two hubs fan
+  out into separate lines instead of one saturated trunk. Alpha also tapers
+  toward both endpoints, where every arc of a hub converges.
+- **Hub markers and labels.** A 1.25 px ring and a 2 px dot, and an
+  uppercase monospace label at 11 px with 0.14 em tracking and alpha 0.65.
+  Both are placed in screen space and snapped to the pixel grid. A label
+  sits beside the marker, or beside the hub's disc of nodes when that is
+  larger on screen, on the side named by `label_side` in `hubs.json`.
+  Labels carry a one-texel obsidian halo so they stay legible over bright
+  arcs.
+- **Post.** The two attachments are resolved. Bloom runs on the emissive
+  attachment only: five dual-filter (Kawase) downsamples and four
+  upsamples. The composite adds scene, emissive and bloom, applies the
+  fitted ACES curve, adds the background and the vignette, and writes to an
+  SRGB8_ALPHA8 target with `GL_FRAMEBUFFER_SRGB`. There is no FXAA; edges
+  are anti-aliased by MSAA and by the analytic coverage in each shader.
+
+### 6.4 Whale events
+
+The dataset has no FX table, so amounts in different currencies cannot be
+compared. A whale is therefore defined per currency: while parsing, each
+worker keeps the 16 largest single transactions of every currency
+(`src/ingest/whale_tracker.hpp`). The per-worker lists are merged with a
+total order (|amount|, then time, source, destination, channel), so the
+result does not depend on the thread count or the chunking. Rank 0–1 in a
+currency is tier 3 (4 px), rank 2–5 tier 2 (3 px), the rest tier 1 (2 px).
+Intensity grows with the tier from 4× to 8×.
+
+**Replay.** The dataset's time range is mapped onto `replay_seconds` of
+replay time (120 s by default) and looped. A whale's arc leaves its source
+at its mapped time. The head travels the arc in `flight_s`, followed by a
+0.4 s trail, and one flash of `flash_s` marks the arrival. Space pauses the
+replay. Each whale is two instances of the same draw, the arc ribbon and
+the flash; inactive ones collapse off-screen in the vertex shader. The
+draw is the same every frame.
+
+### 6.5 Per-frame CPU work
 
 The render thread does the following each frame:
 
 - One fence wait.
 - A copy of at most 4 MiB of a new layout snapshot into a free region of
-  the position ring. A 1M-node snapshot is spread over 3 frames, see §6.5.
-- A ~400-byte uniform write.
+  the position ring. A 1M-node snapshot is spread over 3 frames (§6.8).
+- A 464-byte uniform write.
 - HUD glyph writes into the mapped ring.
 - When the selection changes, the highlight bits are copied into the slot's
   region.
-- About 40 GL calls.
+- The fixed sequence of state changes and draws in §6.2.
 
 There is no `glBufferData` or `glBufferSubData` after initialisation, and
 no buffer re-specification. Debug builds assert zero heap allocations per
 frame (§7).
 
-### 6.3 Edges: LOD, budget and corridors
+### 6.6 Edge budget and priority
 
 **Priority.** Each edge's priority is its |amount| divided by the largest
-edge of the same currency. There is no FX table offline, so amounts in
-different currencies are not compared. The edge buffer stores intra-hub
-edges first and then inter-hub edges, each in descending priority, so
-every LOD is a prefix.
+edge of the same currency. The edge buffer stores intra-hub edges first and
+then inter-hub edges, each in descending priority, so every budget is a
+prefix. When a node pair has several edges (different currencies or
+channels), only the highest-priority one is uploaded, since they would draw
+the same arc.
 
-**Budget.** At most 2,000,000 edges are drawn per frame, and
-`render.json:max_visible_edges` is clamped to that. The budget is split as
-follows:
+**Budget.** At most 2,000,000 arcs are drawn per frame, and
+`render.json:max_visible_edges` is clamped to that. Inter-hub arcs take up
+to `max_inter_hub_edges` (4,000 by default) and intra-hub chords up to
+`max_intra_hub_edges` (30,000) of what remains. The defaults are low on
+purpose: the arcs blend additively, and a larger share turns the busiest
+corridors into solid white.
 
-| Share | Size | Notes |
-|---|---|---|
-| Inter-hub | min(count, `max_inter_hub_edges`, (budget − reserve)/4) | Shown individually only with E on and within `inter_hub_detail_distance` of the camera. |
-| Intra-hub | the rest, further limited by `intra_edge_lod_percentile` | A prefix of the sorted intra range. |
-| Reserve | 64k slots | Keeps the selected node's edges visible even when they rank below the LOD prefix. |
+**Shading weight.** log1p(|amount|) normalised min-max within the currency
+and squared. It drives the arc alpha within its range.
 
-The compute cull writes survivors to the compact lists and bumps the
-indirect instance counts with atomics. The clamp pass then caps the counts
-at the list capacities, so a frame never draws more than the budget. At
-1M nodes the run here drew 1,684,464 intra-hub edges against a capacity of
-2,000,000.
+### 6.7 Picking and selection
 
-**Colour and alpha.** Colour comes from a 1D palette, by currency or by
-channel (C key). Alpha is `base · (0.25 + 0.75·w)`, where
-w = log1p(|amount|) / log1p(max of that currency).
-
-**Corridors.** Inter-hub flows are bundled per (source hub, target hub,
-currency) into cubic Bézier ribbons between the source hub's exit port and
-the target's entry port. Each currency gets its own lane. The lateral
-offset uses cross(direction, up), which flips with direction, so A→B and
-B→A never overlap.
-
-- **Thickness** grows with √(volume relative to the largest bundle of the
-  same currency).
-- **Brightness** follows log(tx count).
-- **Blending** is premultiplied "over", so dense bundles do not saturate to
-  white.
-
-**Individual inter-hub edges.** These follow a 3-segment route:
-source → exit port → the corridor's Bézier samples → entry port → target.
-They therefore sit inside their bundle instead of forming a hairball.
-
-### 6.4 Nodes, depth and picking
-
-- **Nodes.** Each node is a camera-facing quad with a ray-sphere
-  intersection in the fragment shader. The shader writes `gl_FragDepth`
-  with `layout(depth_less)`, and the quad sits on the sphere's front plane,
-  so early-Z stays valid (conservative depth).
-- **Reverse-Z.** The projection is an infinite reverse-Z perspective, with
-  `glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE)`, a 32F depth buffer
-  cleared to 0 and `GL_GREATER`. Precision is spread evenly in log space
-  over the scene's ~10⁴ depth range.
 - **Picking.** On a click only, the node pass is re-rendered into an R32UI
   target that stores the instance id + 1. One pixel is read with
   `glReadPixels` into a persistently mapped PBO behind a fence and consumed
@@ -503,7 +566,7 @@ They therefore sit inside their bundle instead of forming a hairball.
   SSBO 4. The CPU keeps a master copy and copies it into a slot's region
   only when the selection generation changed.
 
-### 6.5 Layout snapshot upload
+### 6.8 Layout snapshot upload
 
 The layout thread publishes into a CPU-side triple buffer. The render
 thread copies the newest snapshot into a free region of the 3-region
@@ -512,24 +575,28 @@ persistent ring.
 A region is free when the two frames that may still be in flight do not
 reference it. With 3 regions and at most 2 busy, one is always free.
 
-A 1M-node snapshot is 12 MB. Copying it in one frame measured 2.0 ms on
-the test VM (mean of 19 uploads, max 2.4 ms), which is the entire 2 ms CPU
-budget. The copy is therefore amortised: each frame copies at most
-`kUploadBytesPerFrame` = 4 MiB into the target region.
-
-Frames keep drawing the previous region until the fill completes. No new
-snapshot is acquired during a fill, so the source, the reader-owned front
-slot, stays valid. The extra latency is three frames, about 50 ms at
+A 1M-node snapshot is 12 MB. Copying it in one frame measured 2.0 ms on the
+test machine (§10), the entire 2 ms CPU budget, so the copy is amortised:
+each frame copies at most `kUploadBytesPerFrame` = 4 MiB into the target
+region. Frames keep drawing the previous region until the fill completes.
+No new snapshot is acquired during a fill, so the source, the reader-owned
+front slot, stays valid. The extra latency is three frames, about 50 ms at
 60 FPS, which is the layout period anyway.
 
-Measured at 1M nodes on the test VM, the copy cost per frame fell from a
-mean of 2.04 ms (max 2.39 ms) to a mean of 0.70 ms (max 0.91 ms).
+### 6.9 Offscreen screenshots
 
-The alternative was to let `T_layout` write straight into GPU-visible
-memory. That was rejected for now: it needs a fenced N-region protocol
-between threads and a stop handshake on context loss.
+`--screenshot FILE.png` renders without a window. On Linux it creates a
+surfaceless EGL context (`EGL_PLATFORM_SURFACELESS_MESA`); elsewhere it
+falls back to a hidden 64×64 GLFW window, since the frame goes to an
+offscreen target either way. The layout runs `--prelayout` iterations and
+then stays frozen. The camera comes from a preset (`globe`, `london`,
+`hub:<ID>`, `whale`, `graticule`) or from `Y,P,D`. Warm-up frames step the
+replay clock by 1/60 s and the captured frame lands on the preset's replay
+time, or on `--time`. The output is read back from the SRGB8 target and
+written with stb_image_write. The program prints an XXH3 digest of the
+pixels, so two runs can be compared without a diff tool.
 
-### 6.6 Robustness
+### 6.10 Robustness
 
 - **Debug context.** A GL debug context is requested; `--no-gl-debug`
   disables it. HIGH-severity messages print and abort. LOW and MEDIUM
@@ -543,25 +610,18 @@ between threads and a stop handshake on context loss.
   destroyed and recreated, and the newest snapshot is re-primed.
 - **Index validation.** Edges with out-of-range endpoints are dropped
   before upload and counted. Pick results and `--select` are range-checked.
-  The graph builder validates indices and counts dropped edges.
 - **RAII.** Every GL object is a move-only RAII wrapper created with DSA
   `glCreate*` calls (`render/gl_raii.hpp`).
 
-### 6.7 GL 4.3 fallback
+### 6.11 GL 4.3 fallback
 
 The program requires GL 4.3 plus `GL_ARB_direct_state_access`,
 `GL_ARB_buffer_storage` and `GL_ARB_clip_control`. `GL_KHR_robustness` and
 `GL_KHR_debug` are optional. glad is generated for core 4.5 plus exactly
 these extensions, so the DSA, storage and clip-control entry points load
-from either source.
-
-On a 4.3 or 4.4 context, the shader loader rewrites `#version 450 core` to
-`#version 430 core`. The shaders use no 4.5-only GLSL features.
-
-Compute culling needs only 4.3. Setting `gpu_culling: false` in
-`render.json` selects the direct-draw path with vertex-shader culling.
-Context creation tries 4.6, 4.5 and 4.3 in turn, and GLFW error output is
-muted while probing.
+from either source. On a 4.3 or 4.4 context, the shader loader rewrites
+`#version 450 core` to `#version 430 core`. Context creation tries 4.6,
+4.5 and 4.3 in turn, and GLFW error output is muted while probing.
 
 ## 7. Zero allocations per frame (Debug assertion)
 
@@ -579,28 +639,24 @@ call. Only these paths are excluded:
 - context re-creation;
 - the on-demand screenshot export.
 
-**Driver allocations.** On the first run the check fired on frame 0 with
-27,694 allocations, none of them ours. The cause:
+**Driver allocations.** A driver that compiles shaders lazily in C++ (Mesa
+with LLVM, for example) allocates inside GL calls, and on ELF platforms its
+`operator new` calls resolve to the executable's replacement. Those
+allocations would be charged to the render thread. Debug builds therefore
+link a second glad library generated with glad's `DEBUG` option, whose pre-
+and post-call hooks wrap every GL call. The application installs hooks
+that mark the call as foreign code. Allocations inside a GL call are
+counted separately and reported, but they do not trigger the assertion.
+Our own allocations still do. Release builds use the plain loader and pay
+nothing.
 
-1. Mesa's llvmpipe compiles shaders lazily with LLVM, which is C++.
-2. On ELF platforms the driver's `operator new` calls resolve to the
-   executable's replacement.
-3. The driver's allocations were therefore charged to our thread.
-
-Real drivers can do the same, for example radeonsi with LLVM or ACO.
-
-The fix: Debug builds link a second glad library generated with glad's
-`DEBUG` option, whose pre- and post-call hooks wrap every GL call. The
-application installs hooks that mark the call as foreign code. Allocations
-inside a GL call are counted separately and reported, but they do not
-trigger the assertion. Our own allocations still do. Release builds use
-the plain loader and pay nothing.
-
-**Verified result.** The Debug build ran 300 frames on llvmpipe with
-simulated clicks, picks, framing and HUD toggles:
+**Verified result.** The Debug build ran 600 frames of the 300k-row
+dataset with injected clicks, key presses (framing, replay pause, HUD and
+arc toggles, hub fly-to) and a drag:
 
 - 0 allocations in our frame code;
-- 58,310 driver allocations inside GL calls, reported and not asserted.
+- 65,682 driver allocations inside GL calls, reported and not asserted;
+- 18 draws per frame throughout (6 scene, 12 post).
 
 ## 8. Ingest details
 
@@ -651,107 +707,81 @@ simulated clicks, picks, framing and HUD toggles:
 | Unknown jurisdictions | Fall back to `OFFSHORE_UNRESOLVED` and get `kNodeUnresolved`. | Spec fallback hub. |
 | Spring strength over mixed currencies | log10(1 + \|amount\|) in raw minor units, normalised by the global maximum. | The log compresses the scale differences. There is no FX table. |
 | Edge priority for the LOD and the 2M budget | \|amount\| relative to the largest edge of the same currency. | The same reason, and it keeps every currency represented. |
-| Intra-hub LOD | A prefix of the priority-sorted intra range. `intra_edge_lod_percentile` (default 0) drops the lowest percentiles. The budget clamps the rest. | One contiguous range, so GPU culling needs no per-edge flag. |
-| "Only glDrawArraysInstanced" vs "compute culling + indirect" | Every draw is `glDrawArraysInstanced` or its indirect form `glDrawArraysIndirect`. | The spec explicitly allows compute culling with indirect draws. |
-| Inter-hub detail distance | 900 world units from the camera to the nearer endpoint, plus all edges of the selected node. | About one hub diameter. Close enough that the edges stay readable. |
-| CSV columns | Matched by header name, any order, extra columns ignored. | Robust to exports from different systems. |
+| Edge budgets | Priority-sorted prefixes: 4,000 inter-hub arcs and 30,000 intra-hub chords by default, under the 2M hard cap. | Arcs blend additively; past a few thousand per corridor they saturate to white and hide the structure. |
+| Whale definition | The 16 largest single transactions of each currency, tiered by rank within the currency. | There is no FX table, so a cross-currency "largest" would be meaningless. |
+| Hub coordinates | Fiat centres at their city's latitude and longitude; chain and fallback hubs pinned to fixed open-ocean points. | Chains and unresolved jurisdictions have no geography; open ocean keeps them off real cities. |
+| Draw calls | Scene geometry uses only `glDrawArraysInstanced`; fullscreen passes use `glDrawArrays(GL_TRIANGLES, 0, 3)`. No culling compute pass, no indirect draws. | A constant draw sequence; the vertex shaders collapse anything that should not show. |
+| CSV columns | Matched by header name, any order, extra columns ignored. | Tolerates exports from different systems. |
 | `.ftxb` layout | 64-byte header, 64-byte records with fixed field offsets, string pool of (offset, length) references. Little-endian. | Fixed-size records chunk without scanning. Documented in `ingest/ftxb_format.hpp`. |
 | Self-loops | Aggregated, but not drawn and not used as springs. | They have no geometric meaning. |
 | Pool size while rendering | hw − 2 workers plus `T_layout`, leaving one core for the render thread and the driver. | Rendering at 60 FPS must not compete with the layout. |
 | Debug allocation check and drivers | Allocations inside GL calls are attributed to the driver (§7). | The check is about our code, and a driver JIT is outside our control. |
-| Snapshot upload | Amortised at 4 MiB per frame (§6.5). | Bounds the per-frame CPU cost. |
+| Snapshot upload | Amortised at 4 MiB per frame (§6.8). | Bounds the per-frame CPU cost. |
 
 ## 10. Performance
 
 ### 10.1 What was measured, and where
 
-All numbers in this section come from this environment:
+All numbers in this section come from one machine:
 
 - 4 vCPUs (Intel Xeon @ 2.10 GHz, AVX2 and AVX-512 capable) in a shared
-  cloud VM.
-- Mesa llvmpipe (software GL 4.5) under Xvfb.
+  cloud VM, no discrete GPU.
 - GCC 13.3, Release with LTO.
 
-There was no GPU, and there was no 8-core machine. Read the tables with
-that in mind.
-
-**Ingest of 10M rows** (synthetic CSV, 1,121 MB, 94 deliberately malformed
-rows):
+**Ingest of 10M rows** (`gen_synthetic --rows 10000000 --seed 42`, CSV,
+1,121 MB; one run):
 
 | Metric | Value |
 |---|---|
 | Parser threads | 2 (max(1, hw − 2) on 4 vCPUs) |
-| Rows/s (parse phase) | 2.60–2.88 M rows/s over five runs |
-| MB/s (parse phase) | 291–323 MB/s |
-| Whole ingest stage (wall) | 4.45–4.97 s, i.e. ≥ 2.0 M rows/s end to end |
-| Entities / aggregated edges | 998,086 / 7,757,120 |
-| Phases (ms) | map 0–0.7, chunk 0.3–18, alloc 647–720, parse 3,476–3,850, registry merge 100–147, dense index 34–53, location votes 137–186, edge scatter 589–770, edge merge 260–366, edge SoA 189–245 |
-| Graph build / corridor bundles | 561–810 ms / 90–111 ms (232 bundles) |
-| Startup to "ready to lay out" | 7.8–9.1 s |
-| Renderer initialisation (static GPU data for 7.76M edges) | 3.7–4.7 s, down from ~14 s before edge priorities were precomputed |
+| Rows/s (parse phase) | 3.37 M rows/s |
+| MB/s (parse phase) | 378 MB/s |
+| Whole ingest stage (wall) | 3.93 s, i.e. 2.55 M rows/s end to end |
+| Entities / aggregated edges | 998,146 / 7,759,391 |
+| Phases (ms) | map 0.0, chunk 0.1, alloc 668, parse 2,968, registry merge 114, dense index 36, location votes 140, edge scatter 615, edge merge 229, edge SoA 176 |
+| Graph build | 513 ms |
+| Whale events | 336 (16 per currency, 21 currencies) |
+| Startup to "ready to lay out" | 7.2 s |
 
-**Layout at 1M nodes** (998,086 nodes, 7.76M edges; headless, 4 threads):
+**Layout at 1M nodes** (998,146 nodes, 7.76M edges; headless, 4 threads,
+20 iterations):
 
 | Phase | Mean ms per iteration |
 |---|---|
-| Octree build | 21.3 |
-| Barnes-Hut repulsion (AVX kernel, 694 interactions per body) | 237.4 |
-| Springs, anchor and integration (incl. inverse permutation) | 52.1 |
-| **Total** | **310.8** |
+| Octree build | 18.2 |
+| Barnes-Hut repulsion (AVX kernel, 694 interactions per body) | 214.2 |
+| Springs, anchor and integration (incl. inverse permutation) | 44.5 |
+| **Total** | **276.9** (p95 315.3) |
 
-The total was 398 ms per iteration before the SIMD, grouping and ordering
-work in this branch. After 20 iterations, 100% of nodes are within 1.2 R of
-their hub anchor. With 3 threads (the interactive pool size), the
-prelayout averaged 348–361 ms per iteration over 200–300 iterations.
+After 20 iterations, 100% of nodes are within 1.2 R of their hub anchor.
 
-**Layout at 30k nodes** (300k-row dataset): converged in 1,205 iterations,
-with 100% of nodes within 1.2 R.
+**Snapshot upload at 1M nodes**: a single 12 MB copy took a mean of
+2.04 ms (max 2.39 ms, 19 frames); amortised to ≤ 4 MiB per frame it took a
+mean of 0.70 ms (max 0.91 ms).
 
-**Render at 1M nodes on llvmpipe** (software rasteriser):
+**Rendering** was not measured on a GPU. The machine above has none, and
+frame times from a software rasteriser say nothing about one. What was
+verified is structural: the draw counts in §6.2 and the zero-allocation
+check in §7.
 
-| Metric | Value |
-|---|---|
-| Draws per frame | 6 |
-| Visible edges | 1,684,464 intra + up to 250,000 inter, capacity 2,000,000 |
-| Snapshot copy, single 12 MB copy (before amortising) | mean 2.04 ms, max 2.39 ms (19 frames) |
-| Snapshot copy, amortised (≤ 4 MiB per frame) | mean 0.70 ms, max 0.91 ms (19 frames) |
-| Frame time | ~2–3 s per frame |
-
-The llvmpipe frame time says nothing about a real GPU. It is listed only to
-show that the full-scale path runs end to end.
-
-Screenshots, all rendered with llvmpipe on a virtual display:
-
-- `docs/screenshots/overview_1m.jpg` and `overview_1m_hud.jpg`: 1M
-  entities after 300 layout iterations. The HUD reports the measured
-  318 ms iteration as a 50 ms target miss.
-- `docs/screenshots/overview_300k.jpg`, `hub_new_york.jpg` and
-  `selection_hud.jpg`: 30k entities after 1,500 iterations.
-
-**Debug allocation check**: 300 frames with clicks and keys, 0
-allocations in our code (§7).
-
-**Builds**: GCC 13 and Clang 18, Release and Debug, all with
-`-DFTVIZ_WERROR=ON` and `-Wall -Wextra -Wpedantic -Wshadow -Wconversion`.
-All four have zero warnings, 36 of 36 tests pass, and every build gives the
-same layout checksum.
+**Builds**: GCC 13 Release and Debug with `-DFTVIZ_WERROR=ON` and
+`-Wall -Wextra -Wpedantic -Wshadow -Wconversion`, zero warnings. All tests
+pass and every build gives the same layout checksum.
 
 ### 10.2 Targets
 
 | Target | Status |
 |---|---|
-| ≥ 1.5M rows/s at 10M rows on 8 cores | **Met on fewer cores.** 2.6–2.8M rows/s in the parse phase and ≥ 2.0M rows/s end to end, with 2 parser threads on 4 vCPUs. |
+| ≥ 1.5M rows/s at 10M rows on 8 cores | **Met on fewer cores.** 3.37M rows/s in the parse phase and 2.55M rows/s end to end, with 2 parser threads on 4 vCPUs. |
 | Octree vs brute force < 2% | **Met.** 0.70% at θ = 0.8. |
 | Layout checksum determinism | **Met** across runs, thread counts, compilers and build types. |
-| ≤ 8 draws per frame | **Met.** 6, or 7 with a pick. |
-| ≤ 2M visible edges by priority | **Met.** Enforced by budget caps and the clamp shader. |
+| Scene draws constant per frame | **Met.** 6 scene draws, or 7 with a pick; 12 post draws with the HUD. |
+| ≤ 2M visible edges by priority | **Met.** Enforced by the budget caps. |
 | Zero allocations per frame | **Met** in our code (Debug assertion, §7). |
-| Zero warnings | **Met** with GCC and Clang. MSVC `/W4` was **not built here**. |
-| Distinct NY, LONDON and TOKYO clusters, elevated chain clouds, bundled corridors | **Met** visually at 30k and 1M nodes (`docs/screenshots/`). |
-| ≤ 50 ms per layout iteration at 1M nodes on 8 cores | **Not measured.** 311 ms on 4 vCPUs. A naive extrapolation to a modern 8-core desktop (2× threads, ~1.5–2× per-core speed) gives roughly 80–100 ms, so this target is probably **not met** yet. The most promising levers are below. |
+| Zero warnings | **Met** with GCC. MSVC `/W4` was **not built**. |
+| ≤ 50 ms per layout iteration at 1M nodes on 8 cores | **Not measured** on 8 cores. 277 ms on 4 vCPUs. A naive extrapolation to a modern 8-core desktop (2× threads, ~1.5–2× per-core speed) gives roughly 70–90 ms, so this target is probably **not met** yet. The most promising levers are below. |
 | 60 FPS at 1080p with 1M nodes + 2M edges on a GTX 1660 or RX 5600 | **Not measured.** No GPU was available. |
-| CPU render ≤ 2 ms | **Not measured** on real hardware. llvmpipe runs the GPU work on the CPU inside GL calls. Our own per-frame CPU work is bounded: the upload chunk is ≤ 4 MiB, and the rest is HUD and uniform writes. |
-| GPU per-pass timings in the HUD | **Implemented** (`GL_TIME_ELAPSED` per pass). Values here are llvmpipe's. |
+| CPU render ≤ 2 ms | **Not measured** on GPU hardware. Our own per-frame CPU work is bounded: the upload chunk is ≤ 4 MiB, and the rest is HUD and uniform writes. |
 
 ### 10.3 Levers for the layout target
 
@@ -759,7 +789,7 @@ These are not implemented. They are listed so the trade-offs are explicit.
 
 1. **Reuse the tree.** Rebuild the octree every k iterations once T is
    small, refitting the centres of charge in between. That saves most of
-   the 21 ms tree cost.
+   the 18 ms tree cost.
 2. **Fewer interactions.** Split large groups adaptively, or use a
    per-body θ for the bodies at the group boundary. The group bounding-box
    test is conservative, at 694 interactions per body.

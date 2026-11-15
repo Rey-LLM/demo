@@ -1,10 +1,13 @@
 #pragma once
 // Data-driven macro-hub taxonomy loaded from config/hubs.json.
 //
-// Hub kinds: FIAT_CENTER (financial centres on the y=0 ring), CHAIN_CLOUD (one
-// volumetric cloud per chain on the elevated ring) and FALLBACK
-// (OFFSHORE_UNRESOLVED, below the centre). Anchors may be given explicitly or
-// left out, in which case the default ring arrangement is computed.
+// Hub kinds: FIAT_CENTER (financial centres), CHAIN_CLOUD (one per chain) and
+// FALLBACK (OFFSHORE_UNRESOLVED). Each hub has two placements:
+//  * a layout anchor in force-layout space (default: fiat ring at y=0, chain
+//    ring above it, fallback below), where the Barnes-Hut solver runs;
+//  * a globe placement (lat, lon, footprint) used only for rendering: each
+//    node is mapped from its hub's layout ball onto the hub's disc on the
+//    globe (model/globe.hpp).
 
 #include <cstdint>
 #include <optional>
@@ -13,7 +16,6 @@
 #include <vector>
 
 #include <glm/vec3.hpp>
-#include <glm/vec4.hpp>
 
 #include "core/json.hpp"
 
@@ -26,9 +28,16 @@ struct HubDef {
   std::string display_name;
   HubType type = HubType::FiatCenter;
   glm::vec3 anchor{0.0f};
-  float radius = 200.0f;
-  glm::vec4 color{1.0f};
+  float radius = 200.0f;            // layout-space radius
   float k_anchor = 0.02f;
+  // Placement on the globe. Fiat centres use their city's coordinates; chain
+  // and fallback hubs have no geography and are pinned to fixed points.
+  float lat_deg = 0.0f;
+  float lon_deg = 0.0f;
+  float footprint_deg = 2.0f;       // angular radius the hub's nodes occupy on the globe
+  // Which side of the marker the label sits on, so that neighbouring hubs'
+  // labels do not overlap: 0 east (default), 1 west, 2 north, 3 south.
+  std::uint32_t label_side = 0;
   std::uint64_t chain_code = 0;  // pack_code8 of the chain id for CHAIN_CLOUD hubs
 };
 

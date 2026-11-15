@@ -1,0 +1,48 @@
+{
+  // ftviz palette: four hues, nothing else. Hex values are sRGB and are
+  // converted to linear RGB at load; the renderer outputs through an sRGB
+  // target. Alphas and intensities are clamped to the ranges noted here.
+
+  "background": "#050608",                  // "Obsidian": flat, no gradient, no noise
+
+  "graticule": {
+    "color": "#C8962E",                     // "Amber Line"
+    "alpha": 0.10,                          // 0.06 .. 0.10
+    "spacing_deg": 15
+  },
+
+  "ink": {
+    "color": "#D9DCE1",                     // nodes, arcs, hub markers, labels
+    "node_alpha_min": 0.04,                 // scaled by log(activity) ...
+    "node_alpha_max": 0.60,                 // ... up to 0.6
+    "node_min_px": 1.0,
+    "node_max_px": 2.5,
+    "intra_arc_alpha_min": 0.015,           // intra-cluster arcs stay below 0.04
+    "intra_arc_alpha_max": 0.035,
+    "inter_arc_alpha_min": 0.03,            // 0.03 .. 0.10, additive
+    "inter_arc_alpha_max": 0.10,
+    "hub_ring_alpha": 0.70,
+    "hub_ring_px": 1.25,
+    "hub_ring_radius_px": 6.0,
+    "hub_dot_px": 2.0,
+    "label_alpha": 0.65,
+    "label_px": 11,
+    "label_tracking_em": 0.14
+  },
+
+  "whale": {
+    "color": "#FFC23D",                     // "Neon Gold": the only emissive colour
+    "intensity_min": 4.0,                   // HDR multiplier, tier 1 ...
+    "intensity_max": 8.0,                   // ... tier 3
+    "width_px": [2, 3, 4],                  // by tier
+    "flight_s": 1.6,                        // head travel time along the arc
+    "trail_s": 0.4,
+    "flash_s": 0.5                          // single flash at the destination
+  },
+
+  "post": {
+    "bloom_strength": 1.0,                  // dual-filter Kawase, 5 mips, emissive only
+    "exposure": 0.6,                        // ACES fitted
+    "vignette": 0.025                       // <= 0.03
+  }
+}

@@ -19,6 +19,9 @@ class OrbitCamera {
   void pan(float dx, float dy) noexcept;  // in screen fractions
   void zoom(float steps) noexcept;        // wheel steps; positive = closer
   void fly_to(const glm::vec3& target, float distance) noexcept;
+  void orbit_to(float yawRad, float pitchRad) noexcept;  // animated, shortest yaw path
+  // Keeps the eye at least `minRadius` from the origin (outside the globe).
+  void set_limits(float minRadius) noexcept { min_radius_ = minRadius; }
 
   void update(float dt) noexcept;
 
@@ -39,6 +42,7 @@ class OrbitCamera {
   float fov_ = 0.87f;
   float near_ = 0.5f;
   float damping_ = 8.0f;
+  float min_radius_ = 0.0f;
 };
 
 }  // namespace ftv

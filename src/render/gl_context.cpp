@@ -1,10 +1,16 @@
 #include "render/gl_context.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
 #include "core/log.hpp"
+
+#if defined(FTVIZ_HAVE_EGL)
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#endif
 
 namespace ftv {
 
@@ -50,11 +56,21 @@ GlWindow::~GlWindow() { destroy(); }
 void GlWindow::destroy() noexcept {
   if (window_) glfwDestroyWindow(window_);
   window_ = nullptr;
+#if defined(FTVIZ_HAVE_EGL)
+  if (egl_display_) {
+    auto dpy = static_cast<EGLDisplay>(egl_display_);
+    eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    if (egl_context_) eglDestroyContext(dpy, static_cast<EGLContext>(egl_context_));
+    eglTerminate(dpy);
+  }
+#endif
+  egl_display_ = nullptr;
+  egl_context_ = nullptr;
   if (glfw_initialised_) glfwTerminate();
   glfw_initialised_ = false;
 }
 
-bool GlWindow::create(int width, int height, const char* title, bool vsync, bool debugContext, bool hidden,
+bool GlWindow::create(int width, int height, const char* title, bool vsync, bool debugContext,
                       std::string& error) {
   glfwSetErrorCallback(glfw_error);
   if (!glfwInit()) {
@@ -77,8 +93,9 @@ bool GlWindow::create(int width, int height, const char* title, bool vsync, bool
     glfwWindowHint(GLFW_CONTEXT_ROBUSTNESS, GLFW_LOSE_CONTEXT_ON_RESET);
     glfwWindowHint(GLFW_DEPTH_BITS, 0);  // we render into our own 32F depth target
     glfwWindowHint(GLFW_SAMPLES, 0);
-    glfwWindowHint(GLFW_VISIBLE, hidden ? GLFW_FALSE : GLFW_TRUE);
-    window_ = glfwCreateWindow(width, height, title, nullptr, nullptr);
+    glfwWindowHint(GLFW_SRGB_CAPABLE, GLFW_TRUE);
+    glfwWindowHint(GLFW_VISIBLE, width > 0 ? GLFW_TRUE : GLFW_FALSE);
+    window_ = glfwCreateWindow(width > 0 ? width : 64, height > 0 ? height : 64, title, nullptr, nullptr);
     if (window_) break;
   }
   glfwSetErrorCallback(glfw_error);
@@ -91,8 +108,56 @@ bool GlWindow::create(int width, int height, const char* title, bool vsync, bool
   }
   glfwMakeContextCurrent(window_);
   glfwSwapInterval(vsync ? 1 : 0);
+  return load_and_check(glfwGetProcAddress, debugContext, error);
+}
 
-  const int glVersion = gladLoadGL(glfwGetProcAddress);
+bool GlWindow::create_offscreen(bool debugContext, std::string& error) {
+#if defined(FTVIZ_HAVE_EGL)
+  auto getPlatformDisplay =
+      reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(eglGetProcAddress("eglGetPlatformDisplayEXT"));
+  EGLDisplay dpy = getPlatformDisplay ? getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr)
+                                      : EGL_NO_DISPLAY;
+  EGLint major = 0, minor = 0;
+  if (dpy != EGL_NO_DISPLAY && eglInitialize(dpy, &major, &minor)) {
+    egl_display_ = dpy;
+    if (eglBindAPI(EGL_OPENGL_API)) {
+      const EGLint cfgAttr[] = {EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT, EGL_NONE};
+      EGLConfig cfg = nullptr;
+      EGLint n = 0;
+      eglChooseConfig(dpy, cfgAttr, &cfg, 1, &n);
+      const int versions[][2] = {{4, 6}, {4, 5}, {4, 3}};
+      for (const auto& v : versions) {
+        const EGLint ctxAttr[] = {EGL_CONTEXT_MAJOR_VERSION,
+                                  v[0],
+                                  EGL_CONTEXT_MINOR_VERSION,
+                                  v[1],
+                                  EGL_CONTEXT_OPENGL_PROFILE_MASK,
+                                  EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
+                                  EGL_CONTEXT_OPENGL_DEBUG,
+                                  debugContext ? EGL_TRUE : EGL_FALSE,
+                                  EGL_NONE};
+        EGLContext ctx = eglCreateContext(dpy, n > 0 ? cfg : EGL_NO_CONFIG_KHR, EGL_NO_CONTEXT, ctxAttr);
+        if (ctx != EGL_NO_CONTEXT) {
+          egl_context_ = ctx;
+          break;
+        }
+      }
+      if (egl_context_ && eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, static_cast<EGLContext>(egl_context_))) {
+        FTV_LOG_INFO("offscreen context: surfaceless EGL %d.%d", major, minor);
+        const bool ok = load_and_check(reinterpret_cast<GLADloadfunc>(eglGetProcAddress), debugContext, error);
+        caps_.has_default_framebuffer = false;
+        return ok;
+      }
+    }
+    destroy();
+  }
+  FTV_LOG_INFO("surfaceless EGL unavailable; using a hidden GLFW window for offscreen rendering");
+#endif
+  return create(0, 0, "ftviz", false, debugContext, error);
+}
+
+bool GlWindow::load_and_check(GLADloadfunc loader, bool debugContext, std::string& error) {
+  const int glVersion = gladLoadGL(loader);
   if (!glVersion) {
     error = "failed to load OpenGL entry points";
     return false;
@@ -111,6 +176,10 @@ bool GlWindow::create(int width, int height, const char* title, bool vsync, bool
   caps_.version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
   glGetIntegerv(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT, &caps_.ssbo_alignment);
   glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &caps_.ubo_alignment);
+  GLint colorSamples = 1, depthSamples = 1;
+  glGetIntegerv(GL_MAX_COLOR_TEXTURE_SAMPLES, &colorSamples);
+  glGetIntegerv(GL_MAX_DEPTH_TEXTURE_SAMPLES, &depthSamples);
+  caps_.max_samples = std::max(1, std::min(colorSamples, depthSamples));
   FTV_LOG_INFO("OpenGL %d.%d core: %s / %s", caps_.major, caps_.minor, caps_.vendor.c_str(), caps_.renderer.c_str());
 
   if (!gl43 || !caps_.has_dsa || !caps_.has_buffer_storage || !caps_.has_clip_control) {

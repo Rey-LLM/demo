@@ -3,28 +3,30 @@
   "window_width": 1920,
   "window_height": 1080,
   "vsync": false,
-  "msaa_samples": 4,
+  "msaa_samples": 8,
+  "ui_scale": 1.0,
 
-  // Edge budget and LOD
+  // Edge budget: at most 2M arcs per frame, heaviest first
   "max_visible_edges": 2000000,
-  "intra_edge_lod_percentile": 0.0,
-  "max_inter_hub_edges": 250000,
-  "inter_hub_detail_distance": 900.0,
-  "gpu_culling": true,
+  "max_inter_hub_edges": 4000,       // heaviest inter-hub arcs drawn (additive: more saturates the corridors)
+  "max_intra_hub_edges": 30000,      // heaviest intra-hub chords drawn (same reason)
+  "intra_edge_max_altitude": 900.0,   // intra-hub arcs hidden when the camera is higher above the surface
+  "arc_segments": 32,
 
-  // Appearance
-  "background": [0.015, 0.018, 0.03],
-  "node_size_scale": 1.0,
-  "edge_alpha": 0.10,
-  "inter_edge_alpha": 0.35,
-  "corridor_width_px": 9.0,
-  "hub_particles_per_hub": 1536,
-  "hub_glow_strength": 0.8,
+  // Globe (world units; altitudes are fractions of the radius)
+  "globe_radius": 1000.0,
+  "node_altitude": 0.0015,
+  "node_relief": 0.0010,
+  "arc_lift": 0.10,
+
+  // Replay: the dataset's time range is mapped onto this many seconds, looped
+  "replay_seconds": 120.0,
 
   // Camera
-  "camera_fov_deg": 50.0,
+  "camera_fov_deg": 40.0,
   "camera_near": 0.5,
   "camera_damping": 8.0,
-  "camera_start_distance": 3600.0,
+  "camera_start_distance": 4300.0,
+  "camera_start_yaw_deg": -10.0,
   "camera_start_pitch_deg": 28.0
 }

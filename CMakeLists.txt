@@ -72,7 +72,25 @@ if(FTVIZ_BUILD_APP)
     GIT_TAG        v2.0.8
     GIT_SHALLOW    TRUE
     SOURCE_SUBDIR  cmake)
-  FetchContent_MakeAvailable(glfw glad)
+  # stb_image_write (public domain), header-only, for --screenshot PNG output.
+  FetchContent_Declare(stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG        0e9206afd9752c8c0826b671b16b702ec7d175cd
+    SOURCE_SUBDIR  ftviz_header_only)
+  FetchContent_MakeAvailable(glfw glad stb)
+  add_library(ftviz_stb INTERFACE)
+  target_include_directories(ftviz_stb SYSTEM INTERFACE ${stb_SOURCE_DIR})
+
+  # Surfaceless EGL lets --screenshot and the render test run without a
+  # display server on Linux. Optional: without it a hidden window is used.
+  set(FTVIZ_HAVE_EGL OFF)
+  if(UNIX AND NOT APPLE)
+    find_path(FTVIZ_EGL_INCLUDE_DIR EGL/egl.h)
+    find_library(FTVIZ_EGL_LIBRARY EGL)
+    if(FTVIZ_EGL_INCLUDE_DIR AND FTVIZ_EGL_LIBRARY)
+      set(FTVIZ_HAVE_EGL ON)
+    endif()
+  endif()
   # Core 4.5 plus the ARB/KHR extensions that make the documented GL 4.3
   # fallback work (DSA, immutable storage, clip control, robustness).
   set(FTVIZ_GL_EXTENSIONS
@@ -149,7 +167,7 @@ add_library(ftviz_model STATIC
   src/model/edge_aggregation.cpp
   src/model/hub_taxonomy.cpp
   src/model/graph_builder.cpp
-  src/model/corridors.cpp)
+  src/model/whales.cpp)
 ftviz_target_defaults(ftviz_model)
 target_link_libraries(ftviz_model PUBLIC ftviz_ingest ftviz_glm)
 
@@ -174,19 +192,30 @@ if(FTVIZ_BUILD_APP)
   ftviz_target_defaults(ftviz_render)
   target_link_libraries(ftviz_render PUBLIC ftviz_layout $<IF:$<CONFIG:Debug>,ftviz_glad_debug,ftviz_glad> glfw)
   target_compile_definitions(ftviz_render PUBLIC GLFW_INCLUDE_NONE)
+  if(FTVIZ_HAVE_EGL)
+    target_include_directories(ftviz_render SYSTEM PRIVATE ${FTVIZ_EGL_INCLUDE_DIR})
+    target_link_libraries(ftviz_render PUBLIC ${FTVIZ_EGL_LIBRARY})
+    target_compile_definitions(ftviz_render PRIVATE FTVIZ_HAVE_EGL=1)
+  endif()
 
-  add_executable(ftviz
-    src/app/main.cpp
+  # Everything but main(): shared by the ftviz binary and the render test.
+  add_library(ftviz_app STATIC
     src/app/cli.cpp
     src/app/render_config.cpp
     src/app/hud_stats.cpp
     src/app/application.cpp
+    src/app/camera_presets.cpp
+    src/app/png_writer.cpp
     src/core/alloc_counter.cpp)
-  ftviz_target_defaults(ftviz)
-  target_link_libraries(ftviz PRIVATE ftviz_render)
-  target_compile_definitions(ftviz PRIVATE
+  ftviz_target_defaults(ftviz_app)
+  target_link_libraries(ftviz_app PUBLIC ftviz_render PRIVATE ftviz_stb)
+  target_compile_definitions(ftviz_app PRIVATE
     FTVIZ_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
     $<$<CONFIG:Debug>:FTVIZ_COUNT_ALLOCATIONS=1>)
+
+  add_executable(ftviz src/app/main.cpp)
+  ftviz_target_defaults(ftviz)
+  target_link_libraries(ftviz PRIVATE ftviz_app)
   # Ship shaders and config next to the binary so it runs from the build dir.
   add_custom_command(TARGET ftviz POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/shaders $<TARGET_FILE_DIR:ftviz>/shaders
@@ -213,4 +242,15 @@ if(FTVIZ_BUILD_TESTS)
   target_link_libraries(ftviz_tests PRIVATE ftviz_layout)
   target_compile_definitions(ftviz_tests PRIVATE FTVIZ_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
   add_test(NAME ftviz_tests COMMAND ftviz_tests)
+
+  # Offscreen render test: real frames through a windowless context; skipped
+  # (exit 77) where no OpenGL 4.5 context is available.
+  if(FTVIZ_BUILD_APP)
+    add_executable(ftviz_render_tests tests/test_render.cpp)
+    ftviz_target_defaults(ftviz_render_tests)
+    target_link_libraries(ftviz_render_tests PRIVATE ftviz_app)
+    target_compile_definitions(ftviz_render_tests PRIVATE FTVIZ_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+    add_test(NAME ftviz_render_tests COMMAND ftviz_render_tests)
+    set_tests_properties(ftviz_render_tests PROPERTIES SKIP_RETURN_CODE 77)
+  endif()
 endif()

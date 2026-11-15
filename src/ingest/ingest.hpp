@@ -19,6 +19,7 @@
 #include "ingest/key_hash.hpp"
 #include "ingest/mapped_file.hpp"
 #include "ingest/parse_worker.hpp"
+#include "ingest/whale_tracker.hpp"
 
 namespace ftv {
 
@@ -76,6 +77,7 @@ struct IngestResult {
   AlignedVector<std::uint64_t> label_offset;  // dense index -> file offset of first raw identifier
   AlignedVector<std::uint16_t> label_len;
   EntityLocations locations;
+  std::vector<WhaleCandidate> whales;  // per-currency top-K single transactions (merge_whales order)
   std::unique_ptr<EntityRegistry> registry;
   std::vector<std::unique_ptr<ParseWorker>> workers;  // hold edge partials until aggregation
   IngestStats stats;

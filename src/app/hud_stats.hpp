@@ -33,7 +33,8 @@ struct FrameStats {
   std::uint64_t allocs_total = 0;
   bool alloc_counting = false;
   bool inter_detail = true;
-  bool color_by_channel = false;
+  bool replay_paused = false;
+  float replay_time = 0.0f;
   bool hud_visible = true;
 };
 
@@ -87,7 +88,6 @@ class HudStats {
   Block select_;    // below the stats block
   Block help_;      // bottom-left
   Block legend_;    // top-right
-  std::array<std::uint32_t, kMaxLegend> legend_colors_{};
   std::size_t legend_count_ = 0;
 
   // Static lines prepared at construction (dataset facts never change).

@@ -16,6 +16,7 @@
 
 #include <glm/geometric.hpp>
 #include <glm/trigonometric.hpp>
+#include <xxhash.h>
 
 #include "app/hud_stats.hpp"
 #include "app/render_config.hpp"
@@ -28,10 +29,12 @@
 #include "layout/force_solver.hpp"
 #include "layout/layout_engine.hpp"
 #include "layout/layout_params.hpp"
-#include "model/corridors.hpp"
 #include "model/edge_aggregation.hpp"
 #include "model/graph_builder.hpp"
 #include "model/hub_taxonomy.hpp"
+#include "model/whales.hpp"
+#include "app/camera_presets.hpp"
+#include "app/png_writer.hpp"
 #include "render/camera.hpp"
 #include "render/gl_context.hpp"
 #include "render/renderer.hpp"
@@ -97,13 +100,15 @@ void print_ingest_report(const IngestResult& in, const std::string& path) {
   std::printf("\n");
 }
 
-void print_model_report(const Graph& g, const HubTaxonomy& tax, std::size_t bundles, double buildMs,
-                        double corridorMs) {
+void print_model_report(const Graph& g, const HubTaxonomy& tax, const WhaleSet& whales, double buildMs) {
   std::printf("[model] graph %s nodes, %s edges (%s inter-hub, %.2f%%), %s bridges, %s dropped; build %.1f ms\n",
               grp(g.node_count()).c_str(), grp(g.edge_count()).c_str(), grp(g.inter_hub_edges).c_str(),
               g.edge_count() ? 100.0 * static_cast<double>(g.inter_hub_edges) / static_cast<double>(g.edge_count()) : 0.0,
               grp(g.bridge_count).c_str(), grp(g.dropped_edges).c_str(), buildMs);
-  std::printf("[model] %zu corridor bundles (%.1f ms), %zu currencies\n", bundles, corridorMs, g.currencies.size());
+  std::printf("[model] %zu currencies, %zu whale events (top %zu single transactions per currency), "
+              "replay %.0f s\n",
+              g.currencies.size(), whales.events.size(), WhaleTracker::kPerCurrency,
+              static_cast<double>(whales.replay_seconds));
   std::printf("[model] hub populations:");
   for (std::size_t h = 0; h < tax.size(); ++h) {
     std::printf(" %s=%s", tax.hubs()[h].id.c_str(),
@@ -308,17 +313,24 @@ struct FrameRecord {
   float upload_ms;  // layout snapshot copy into the position ring (0 when none arrived)
 };
 
+// Replay clock: loops over [0, replay_seconds). Space pauses it.
+float wrap_time(float t, float period) {
+  if (period <= 0.0f) return t;
+  t = std::fmod(t, period);
+  return t < 0.0f ? t + period : t;
+}
+
 class Viewer {
  public:
   Viewer(const CliOptions& cli, const RenderSettings& rs, const std::string& shaderDir, const Graph& graph,
-         const HubTaxonomy& tax, const std::vector<CorridorBundle>& bundles, const IngestResult& ingest,
-         LayoutEngine& engine, std::string inputName)
+         const HubTaxonomy& tax, const WhaleSet& whales, const IngestResult& ingest, LayoutEngine& engine,
+         std::string inputName)
       : cli_(cli),
         rs_(rs),
         shader_dir_(shaderDir),
         graph_(graph),
         tax_(tax),
-        bundles_(bundles),
+        whales_(whales),
         engine_(engine),
         title_("ftviz - " + inputName),
         hud_stats_(graph, tax, ingest, inputName) {}
@@ -332,6 +344,7 @@ class Viewer {
   void handle_key(int key);
   void frame_selection();
   void fly_to_hub(std::size_t hub);
+  void overview();
   void print_frame_summary() const;
 
   const CliOptions& cli_;
@@ -339,7 +352,7 @@ class Viewer {
   std::string shader_dir_;
   const Graph& graph_;
   const HubTaxonomy& tax_;
-  const std::vector<CorridorBundle>& bundles_;
+  const WhaleSet& whales_;
   LayoutEngine& engine_;
   std::string title_;
 
@@ -351,7 +364,7 @@ class Viewer {
   FrameStats frame_stats_;
   bool show_hud_ = true;
   bool inter_detail_ = true;
-  bool color_by_channel_ = false;
+  bool replay_paused_ = false;
   bool selection_changed_ = true;
   std::uint64_t foreign_allocs_ = 0;  // driver allocations inside GL calls (Debug counting only)
   std::vector<FrameRecord> records_;
@@ -359,8 +372,7 @@ class Viewer {
 
 bool Viewer::create_gpu_side() {
   std::string err;
-  const bool hidden = false;  // even screenshot runs map the window: an unmapped window's back buffer is undefined
-  if (!window_.create(rs_.window_width, rs_.window_height, title_.c_str(), rs_.vsync, cli_.gl_debug, hidden, err)) {
+  if (!window_.create(rs_.window_width, rs_.window_height, title_.c_str(), rs_.vsync, cli_.gl_debug, err)) {
     FTV_LOG_ERROR("%s", err.c_str());
     return false;
   }
@@ -369,7 +381,7 @@ bool Viewer::create_gpu_side() {
   gladSetGLPostCallback(&gl_post_call_hook);
 #endif
   install_callbacks(window_.handle(), &input_);
-  renderer_ = std::make_unique<Renderer>(graph_, tax_, bundles_, rs_, window_.caps(), shader_dir_);
+  renderer_ = std::make_unique<Renderer>(graph_, tax_, whales_, rs_, window_.caps(), shader_dir_);
   if (!renderer_->init(err)) {
     FTV_LOG_ERROR("renderer initialisation failed:\n%s", err.c_str());
     return false;
@@ -389,25 +401,30 @@ void Viewer::destroy_gpu_side() {
   window_.destroy();
 }
 
+void Viewer::overview() {
+  camera_.fly_to(glm::vec3(0.0f), rs_.camera_start_distance);
+}
+
 void Viewer::fly_to_hub(std::size_t hub) {
   if (hub >= tax_.size()) return;
-  const HubDef& d = tax_.hubs()[hub];
-  camera_.fly_to(d.anchor, d.radius / std::sin(camera_.fov_y() * 0.5f) * 1.35f);
+  const ViewSetup v = hub_view(tax_.hubs()[hub], rs_);  // allocation free (runs inside the frame body)
+  camera_.fly_to(v.target, v.distance);
+  camera_.orbit_to(v.yaw, v.pitch);
 }
 
 void Viewer::frame_selection() {
   const auto sel = renderer_->selection();
   if (!sel) {
-    camera_.fly_to(glm::vec3(0.0f), rs_.camera_start_distance);
+    overview();
     return;
   }
-  const glm::vec3 c = renderer_->node_position(*sel);
+  const glm::vec3 c = renderer_->node_world_position(*sel);
   float extent = 0.0f;
   const auto& adj = graph_.adjacency;
   for (std::uint32_t k = adj.offset[*sel]; k < adj.offset[*sel + 1]; ++k) {
-    extent = std::max(extent, glm::length(renderer_->node_position(adj.neighbor[k]) - c));
+    extent = std::max(extent, glm::length(renderer_->node_world_position(adj.neighbor[k]) - c));
   }
-  extent = std::clamp(extent, 15.0f, 2500.0f);
+  extent = std::clamp(extent, 5.0f, 2.0f * rs_.globe.radius);
   camera_.fly_to(c, extent / std::sin(camera_.fov_y() * 0.5f) * 1.1f);
 }
 
@@ -418,7 +435,7 @@ void Viewer::handle_key(int key) {
   }
   switch (key) {
     case GLFW_KEY_0:
-      camera_.fly_to(glm::vec3(0.0f), rs_.camera_start_distance);
+      overview();
       break;
     case GLFW_KEY_F:
       frame_selection();
@@ -435,8 +452,8 @@ void Viewer::handle_key(int key) {
     case GLFW_KEY_H:
       show_hud_ = !show_hud_;
       break;
-    case GLFW_KEY_C:
-      color_by_channel_ = !color_by_channel_;
+    case GLFW_KEY_SPACE:
+      replay_paused_ = !replay_paused_;
       break;
     case GLFW_KEY_ESCAPE:
       if (renderer_->selection()) {
@@ -509,11 +526,12 @@ void Viewer::print_frame_summary() const {
   for (std::size_t p = 0; p < kGpuPassCount; ++p) {
     std::printf(" %s %.3f", kGpuPassNames[p], static_cast<double>(t.ms(static_cast<GpuPass>(p))));
   }
-  std::printf("\n[render] draws/frame %u, visible edges %s (intra %s + inter %s), capacity %s, allocations %" PRIu64
+  std::printf("\n[render] draws/frame %u (scene %u, post %u), arcs %s (intra %s + inter %s), allocations %" PRIu64
               "%s\n",
-              c.draw_calls, grp(static_cast<std::uint64_t>(c.visible_intra) + c.visible_inter).c_str(),
-              grp(c.visible_intra).c_str(), grp(c.visible_inter).c_str(), grp(renderer_->visible_capacity()).c_str(),
-              frame_stats_.allocs_total, frame_stats_.alloc_counting ? "" : " (counting only in Debug builds)");
+              c.draw_calls, c.scene_draws, c.post_draws,
+              grp(static_cast<std::uint64_t>(c.visible_intra) + c.visible_inter).c_str(),
+              grp(c.visible_intra).c_str(), grp(c.visible_inter).c_str(), frame_stats_.allocs_total,
+              frame_stats_.alloc_counting ? "" : " (counting only in Debug builds)");
   if (frame_stats_.alloc_counting) {
     std::printf("[render] driver allocations inside GL calls on the render thread: %" PRIu64
                 " (third-party code, reported but not asserted)\n",
@@ -525,13 +543,28 @@ int Viewer::run() {
   if (!create_gpu_side()) return 1;
 
   camera_.configure(rs_.camera_fov_deg, rs_.camera_near, rs_.camera_damping);
-  const float pitch = glm::radians(cli_.cam_pitch_deg > -900.0f ? cli_.cam_pitch_deg : rs_.camera_start_pitch_deg);
-  const float dist = cli_.cam_distance > 0.0f ? cli_.cam_distance : rs_.camera_start_distance;
-  camera_.set_immediate(glm::vec3(0.0f), dist, glm::radians(cli_.cam_yaw_deg), pitch);
-  if (cli_.fly_hub >= 1 && static_cast<std::size_t>(cli_.fly_hub) <= tax_.size()) {
-    const HubDef& d = tax_.hubs()[static_cast<std::size_t>(cli_.fly_hub - 1)];
-    camera_.set_immediate(d.anchor, d.radius / std::sin(camera_.fov_y() * 0.5f) * 1.35f,
-                          glm::radians(cli_.cam_yaw_deg), pitch);
+  camera_.set_limits(rs_.globe.radius * 1.002f);
+  float replayTime = cli_.start_time >= 0.0f ? cli_.start_time : 0.0f;
+  {
+    ViewSetup v;
+    std::string err;
+    const NodePositionFn pos = [this](std::uint32_t n) { return renderer_->node_world_position(n); };
+    const std::string preset = !cli_.camera_preset.empty() ? cli_.camera_preset
+                               : cli_.fly_hub >= 1 && static_cast<std::size_t>(cli_.fly_hub) <= tax_.size()
+                                   ? "hub:" + tax_.hubs()[static_cast<std::size_t>(cli_.fly_hub - 1)].id
+                                   : std::string("globe");
+    if (!camera_preset(preset, tax_, whales_, pos, rs_, v, err)) {
+      FTV_LOG_ERROR("%s", err.c_str());
+      destroy_gpu_side();
+      return 1;
+    }
+    if (cli_.camera_preset.empty() && cli_.cam_pitch_deg > -900.0f) {
+      v.yaw = glm::radians(cli_.cam_yaw_deg);
+      v.pitch = glm::radians(cli_.cam_pitch_deg);
+      if (cli_.cam_distance > 0.0f) v.distance = cli_.cam_distance;
+    }
+    camera_.set_immediate(v.target, v.distance, v.yaw, v.pitch);
+    if (!cli_.camera_preset.empty() && cli_.start_time < 0.0f) replayTime = v.time;
   }
   inter_detail_ = cli_.inter_detail;
   show_hud_ = cli_.show_hud;
@@ -541,25 +574,22 @@ int Viewer::run() {
     camera_.update(1e3f);  // jump straight to the framed view
   }
 
-  const bool screenshotMode = !cli_.screenshot.empty();
-  const unsigned frameLimit = cli_.frames ? cli_.frames : (screenshotMode ? 6u : 0u);
+  const unsigned frameLimit = cli_.frames;
   records_.reserve(frameLimit ? frameLimit : 1u);
   frame_stats_.alloc_counting = allocation_counting_enabled();
 
   Stopwatch clock;
   double sinceHudRefresh = 1e9;
   double frameEma = 16.0, cpuEma = 1.0, cpuPeak = 0.0;
-  float animTime = 0.0f;
   unsigned frame = 0;
   bool allocWarned = false;
-  int exitCode = 0;
 
   while (!glfwWindowShouldClose(window_.handle())) {
     // ---- frame body: must not allocate (asserted in Debug builds) ----------
     // The counted region spans the whole iteration: event polling (our GLFW
     // callbacks), input, pick readback, camera, HUD text and every GL call.
     // Only the exceptional paths that `continue` below (minimised window,
-    // context re-creation) and the on-demand screenshot export are excluded.
+    // context re-creation) are excluded.
     const std::uint64_t alloc0 = thread_allocation_count();
     const std::uint64_t foreign0 = thread_foreign_allocation_count();
     glfwPollEvents();
@@ -580,7 +610,7 @@ int Viewer::run() {
 
     const double dtMs = clock.lap_ms();
     const auto dt = static_cast<float>(std::min(dtMs, 250.0) / 1000.0);
-    animTime += dt;
+    if (!replay_paused_) replayTime = wrap_time(replayTime + dt, rs_.replay_seconds);
     frameEma += (dtMs - frameEma) * 0.08;
 
     Stopwatch cpu;
@@ -602,7 +632,8 @@ int Viewer::run() {
         frame_stats_.cpu_ms = cpuEma;
         frame_stats_.cpu_peak_ms = cpuPeak;
         frame_stats_.inter_detail = inter_detail_;
-        frame_stats_.color_by_channel = color_by_channel_;
+        frame_stats_.replay_paused = replay_paused_;
+        frame_stats_.replay_time = replayTime;
         hud_stats_.refresh(frame_stats_, *renderer_, engine_.status(), renderer_->selection());
         sinceHudRefresh = 0.0;
         cpuPeak = 0.0;
@@ -616,12 +647,11 @@ int Viewer::run() {
     p.view = camera_.view();
     p.proj = camera_.projection(aspect);
     p.camera_pos = camera_.position();
-    p.time = animTime;
+    p.time = replayTime;
     p.near_plane = camera_.near_plane();
     p.width = fbw;
     p.height = fbh;
     p.inter_detail = inter_detail_;
-    p.color_by_channel = color_by_channel_;
     p.show_hud = show_hud_;
     renderer_->draw_frame(p);
 
@@ -651,14 +681,6 @@ int Viewer::run() {
       records_.push_back(
           FrameRecord{static_cast<float>(dtMs), static_cast<float>(cpuMs), renderer_->counters().upload_ms});
     }
-    if (screenshotMode && frame + 1 == frameLimit) {
-      if (renderer_->save_screenshot(cli_.screenshot, fbw, fbh)) {
-        std::printf("[render] screenshot written to %s (%dx%d)\n", cli_.screenshot.c_str(), fbw, fbh);
-      } else {
-        FTV_LOG_ERROR("could not write screenshot %s", cli_.screenshot.c_str());
-        exitCode = 1;
-      }
-    }
     glfwSwapBuffers(window_.handle());
     ++frame;
     if (frameLimit && frame >= frameLimit) break;
@@ -666,7 +688,78 @@ int Viewer::run() {
 
   if (frameLimit) print_frame_summary();
   destroy_gpu_side();
-  return exitCode;
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Screenshot mode: offscreen context, fixed time step, PNG output
+// ---------------------------------------------------------------------------
+
+int render_screenshot(const CliOptions& cli, const RenderSettings& rs, const std::string& shaderDir,
+                      const Graph& graph, const HubTaxonomy& tax, const WhaleSet& whales, LayoutEngine& engine) {
+  GlWindow ctx;
+  std::string err;
+  if (!ctx.create_offscreen(cli.gl_debug, err)) {
+    FTV_LOG_ERROR("%s", err.c_str());
+    return 1;
+  }
+  int code = 0;
+  {
+    Renderer renderer(graph, tax, whales, rs, ctx.caps(), shaderDir);
+    if (!renderer.init(err)) {
+      FTV_LOG_ERROR("renderer initialisation failed:\n%s", err.c_str());
+      return 1;
+    }
+    engine.snapshots().acquire_latest();
+    renderer.prime_positions(engine.snapshots().front());
+
+    OrbitCamera camera;
+    camera.configure(rs.camera_fov_deg, rs.camera_near, rs.camera_damping);
+    ViewSetup v;
+    const NodePositionFn pos = [&renderer](std::uint32_t n) { return renderer.node_world_position(n); };
+    if (!camera_preset(cli.camera_preset.empty() ? std::string("globe") : cli.camera_preset, tax, whales, pos, rs, v,
+                       err)) {
+      FTV_LOG_ERROR("%s", err.c_str());
+      return 1;
+    }
+    camera.set_immediate(v.target, v.distance, v.yaw, v.pitch);
+    // Fixed simulated time: warm-up frames step 1/60 s and the captured frame
+    // lands on the requested replay time, so the output is reproducible.
+    const float target = cli.start_time >= 0.0f ? cli.start_time : v.time;
+    const unsigned warm = cli.warmup_frames;
+    const int w = rs.window_width, h = rs.window_height;
+    const float aspect = static_cast<float>(w) / static_cast<float>(h);
+    Stopwatch sw;
+    for (unsigned f = 0; f <= warm; ++f) {
+      renderer.begin_frame(engine.snapshots());
+      FrameParams p;
+      p.view = camera.view();
+      p.proj = camera.projection(aspect);
+      p.camera_pos = camera.position();
+      p.time = target - static_cast<float>(warm - f) / 60.0f;
+      p.near_plane = camera.near_plane();
+      p.width = w;
+      p.height = h;
+      p.inter_detail = cli.inter_detail;
+      p.show_hud = false;
+      p.present = false;
+      renderer.draw_frame(p);
+    }
+    std::vector<std::uint8_t> rgba;
+    int ow = 0, oh = 0;
+    if (!renderer.read_output_rgba8(rgba, ow, oh) || !write_png_rgb(cli.screenshot, rgba, ow, oh)) {
+      FTV_LOG_ERROR("could not write screenshot %s", cli.screenshot.c_str());
+      code = 1;
+    } else {
+      const std::uint64_t digest = XXH3_64bits(rgba.data(), rgba.size());
+      std::printf("[screenshot] %s: %dx%d, %u warm-up frames, replay t=%.3f s, %zu whales in flight, "
+                  "pixel digest %016" PRIx64 ", %.1f s\n",
+                  cli.screenshot.c_str(), ow, oh, warm, static_cast<double>(target),
+                  static_cast<std::size_t>(renderer.counters().active_whales), digest, sw.seconds());
+    }
+  }
+  ctx.destroy();
+  return code;
 }
 
 }  // namespace
@@ -682,6 +775,7 @@ int run_application(const CliOptions& cli, const std::string& exeDir) {
   // ---- configuration ---------------------------------------------------------
   const std::string hubsPath = resolve_path(cli.hubs_path, exeDir, "config/hubs.json");
   const std::string renderPath = resolve_path(cli.render_path, exeDir, "config/render.json");
+  const std::string themePath = resolve_path(cli.theme_path, exeDir, "config/theme.json");
   const std::string shaderDir = resolve_path(cli.shader_dir, exeDir, "shaders");
 
   auto taxonomy = HubTaxonomy::load(hubsPath, err);
@@ -698,13 +792,21 @@ int run_application(const CliOptions& cli, const std::string& exeDir) {
       return 1;
     }
     rs = *loaded;
+    auto theme = load_theme(themePath, err);
+    if (!theme) {
+      FTV_LOG_ERROR("theme: %s", err.c_str());
+      return 1;
+    }
+    rs.theme = *theme;
     if (cli.width > 0) rs.window_width = cli.width;
     if (cli.height > 0) rs.window_height = cli.height;
     if (cli.vsync >= 0) rs.vsync = cli.vsync != 0;
     if (cli.msaa >= 1) rs.msaa_samples = std::min(cli.msaa, 16);
+    if (cli.ui_scale > 0.0f) rs.ui_scale = cli.ui_scale;
   }
-  std::printf("[config] hubs %s (%zu hubs), render %s, shaders %s\n", hubsPath.c_str(), taxonomy->size(),
-              cli.headless ? "-" : renderPath.c_str(), cli.headless ? "-" : shaderDir.c_str());
+  std::printf("[config] hubs %s (%zu hubs), render %s, theme %s, shaders %s\n", hubsPath.c_str(), taxonomy->size(),
+              cli.headless ? "-" : renderPath.c_str(), cli.headless ? "-" : themePath.c_str(),
+              cli.headless ? "-" : shaderDir.c_str());
 
   // ---- threads ------------------------------------------------------------------
   // Interactive runs keep one core free for the render thread / driver; the
@@ -741,9 +843,9 @@ int run_application(const CliOptions& cli, const std::string& exeDir) {
   Stopwatch sw;
   Graph graph = build_graph(ingest, std::move(edges), *taxonomy, pool);
   const double buildMs = sw.lap_ms();
-  const std::vector<CorridorBundle> bundles = build_corridor_bundles(graph);
-  const double corridorMs = sw.lap_ms();
-  print_model_report(graph, *taxonomy, bundles.size(), buildMs, corridorMs);
+  const WhaleSet whales =
+      build_whales(ingest, graph, rs.replay_seconds, rs.theme.whale_flight_s + rs.theme.whale_flash_s);
+  print_model_report(graph, *taxonomy, whales, buildMs);
 
   // ---- layout -----------------------------------------------------------------------
   ForceSolver solver(graph, *taxonomy, layoutParams, pool);
@@ -753,19 +855,19 @@ int run_application(const CliOptions& cli, const std::string& exeDir) {
   const IterationStats pre = run_layout_iterations(solver, cli.prelayout, false, "prelayout", nullptr);
 
   LayoutEngine engine(solver, graph.node_count());
-  // With a prelayout, its last iteration seeds the HUD timings, so frozen
-  // (screenshot) runs report a measured iteration time instead of nothing.
+  // With a prelayout, its last iteration seeds the HUD timings.
   engine.publish_now(cli.prelayout > 0 ? &pre : nullptr);
-  const bool screenshotMode = !cli.screenshot.empty();
-  // Screenshots capture the pre-laid-out state exactly; otherwise T_layout
-  // keeps refining in the background while the user explores.
+  if (!cli.screenshot.empty()) {
+    // Screenshots capture the pre-laid-out state exactly (layout thread never starts).
+    return render_screenshot(cli, rs, shaderDir, graph, *taxonomy, whales, engine);
+  }
   if (cli.start_paused) engine.set_paused(true);
-  if (!screenshotMode) engine.start();
+  engine.start();
 
   const std::string inputName = fs::path(cli.input).filename().string();
   int code = 0;
   {
-    Viewer viewer(cli, rs, shaderDir, graph, *taxonomy, bundles, ingest, engine, inputName);
+    Viewer viewer(cli, rs, shaderDir, graph, *taxonomy, whales, ingest, engine, inputName);
     code = viewer.run();
   }
   engine.stop();

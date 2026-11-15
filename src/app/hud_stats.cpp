@@ -7,18 +7,15 @@ namespace ftv {
 
 namespace {
 
-constexpr std::uint32_t kWhite = pack_rgba(235, 238, 245, 255);
-constexpr std::uint32_t kDim = pack_rgba(150, 160, 178, 255);
-constexpr std::uint32_t kAccent = pack_rgba(120, 200, 255, 255);
-constexpr std::uint32_t kGood = pack_rgba(110, 230, 140, 255);
-constexpr std::uint32_t kBad = pack_rgba(255, 120, 100, 255);
-constexpr std::uint32_t kWarn = pack_rgba(255, 205, 90, 255);
-constexpr std::uint32_t kPanel = pack_rgba(6, 8, 14, 170);
-
-std::uint32_t to_rgba(const glm::vec4& c) noexcept {
-  auto u = [](float v) { return static_cast<unsigned>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
-  return pack_rgba(u(c.x), u(c.y), u(c.z), 255);
-}
+// The HUD uses the theme's hues only: ink (#D9DCE1) at three alphas, amber
+// (#C8962E) for anything that misses a target, obsidian (#050608) panels.
+constexpr std::uint32_t kWhite = pack_rgba(0xD9, 0xDC, 0xE1, 178);
+constexpr std::uint32_t kDim = pack_rgba(0xD9, 0xDC, 0xE1, 110);
+constexpr std::uint32_t kAccent = pack_rgba(0xD9, 0xDC, 0xE1, 220);
+constexpr std::uint32_t kGood = kWhite;
+constexpr std::uint32_t kBad = pack_rgba(0xC8, 0x96, 0x2E, 230);
+constexpr std::uint32_t kWarn = kBad;
+constexpr std::uint32_t kPanel = pack_rgba(0x05, 0x06, 0x08, 200);
 
 }  // namespace
 
@@ -103,8 +100,7 @@ HudStats::HudStats(const Graph& graph, const HubTaxonomy& taxonomy, const Ingest
     } else {
       key.str("    ");
     }
-    legend_colors_[h] = to_rgba(d.color);
-    auto& name = l.add(legend_colors_[h]);
+    auto& name = l.add(kWhite);
     name.str(d.display_name.empty() ? std::string_view(d.id) : std::string_view(d.display_name));
     name.pad_to(nameWidth);
     const std::uint32_t pop = h < graph.hub_population.size() ? graph.hub_population[h] : 0u;
@@ -147,9 +143,9 @@ void HudStats::refresh(const FrameStats& f, const Renderer& r, const LayoutStatu
   }
   {
     Line& l = stats_.next();
-    l.add(kDim).str("DRAWS ");
-    l.add(c.draw_calls <= 8 ? kWhite : kBad).u64(c.draw_calls);
-    l.add(kDim).str("  VISIBLE EDGES ");
+    l.add(kDim).str("DRAWS SCENE ");
+    l.add(c.scene_draws <= 8 ? kWhite : kBad).u64(c.scene_draws);
+    l.add(kDim).str(" + POST ").u64(c.post_draws).str("  ARCS ");
     l.add(kWhite).grouped(static_cast<std::uint64_t>(c.visible_intra) + c.visible_inter);
     l.add(kDim)
         .str(" / CAP ")
@@ -162,9 +158,9 @@ void HudStats::refresh(const FrameStats& f, const Renderer& r, const LayoutStatu
   }
   {
     Line& l = stats_.next();
-    l.add(kDim).str("EDGES INTRA ").grouped(r.intra_edge_count()).str(" (LOD ").grouped(r.intra_budget());
-    l.add(kDim).str(")  INTER ").grouped(r.inter_edge_count()).str("  CORRIDORS ").grouped(r.bundle_count());
-    l.add(kDim).str(r.gpu_culling() ? "  CULL: GPU" : "  CULL: VS FALLBACK");
+    l.add(kDim).str("EDGES INTRA ").grouped(r.intra_edge_count()).str(" (BUDGET ").grouped(r.intra_budget());
+    l.add(kDim).str(")  INTER ").grouped(r.inter_edge_count()).str(" (BUDGET ").grouped(r.inter_budget()).str(")");
+    l.add(kDim).str("  WHALES ").grouped(r.whale_count()).str(" (ACTIVE ").u64(c.active_whales).str(")");
   }
   {
     Line& l = stats_.next();
@@ -198,11 +194,11 @@ void HudStats::refresh(const FrameStats& f, const Renderer& r, const LayoutStatu
     const bool fpsOk = f.fps >= 60.0;
     const bool cpuOk = f.cpu_ms <= 2.0;
     const bool gpuOk = t.total_ms() <= 16.6f;
-    const bool drawOk = c.draw_calls <= 8;
+    const bool drawOk = c.scene_draws <= 8;
     l.add(fpsOk ? kGood : kBad).str(fpsOk ? "FPS>=60 OK  " : "FPS>=60 MISS  ");
     l.add(cpuOk ? kGood : kBad).str(cpuOk ? "CPU<=2MS OK  " : "CPU<=2MS MISS  ");
     l.add(gpuOk ? kGood : kBad).str(gpuOk ? "GPU<=16.6MS OK  " : "GPU<=16.6MS MISS  ");
-    l.add(drawOk ? kGood : kBad).str(drawOk ? "DRAWS<=8 OK  " : "DRAWS<=8 MISS  ");
+    l.add(drawOk ? kGood : kBad).str(drawOk ? "SCENE DRAWS<=8 OK  " : "SCENE DRAWS<=8 MISS  ");
     if (f.alloc_counting) {
       const bool allocOk = f.allocs_last_frame == 0;
       auto& a = l.add(allocOk ? kGood : kBad);
@@ -234,7 +230,7 @@ void HudStats::refresh(const FrameStats& f, const Renderer& r, const LayoutStatu
       l.add(kDim).str("HUB ");
       if (hub < taxonomy_.size()) {
         const HubDef& d = taxonomy_.hubs()[hub];
-        l.add(to_rgba(d.color)).str(d.display_name.empty() ? std::string_view(d.id) : std::string_view(d.display_name));
+        l.add(kWhite).str(d.display_name.empty() ? std::string_view(d.id) : std::string_view(d.display_name));
       }
       l.add(kDim)
           .str("  DEGREE ")
@@ -245,7 +241,7 @@ void HudStats::refresh(const FrameStats& f, const Renderer& r, const LayoutStatu
       if (flags & kNodeUnresolved) l.add(kWarn).str("  UNRESOLVED");
     }
     {
-      const glm::vec3 p = r.node_position(n);
+      const glm::vec3 p = r.node_world_position(n);
       Line& l = select_.next();
       l.add(kDim).str("POS ").fixed(p.x, 1).str(", ").fixed(p.y, 1).str(", ").fixed(p.z, 1);
       l.add(kDim).str("   [F] FRAME  [ESC] CLEAR");
@@ -262,9 +258,9 @@ void HudStats::refresh(const FrameStats& f, const Renderer& r, const LayoutStatu
     l.add(kDim).str("  [L] LAYOUT: ");
     l.add(!layout.running || layout.paused ? kWarn : kGood)
         .str(!layout.running ? "FROZEN" : (layout.paused ? "PAUSED" : "ON"));
-    l.add(kDim).str("  [R] REHEAT  [C] COLOR: ");
-    l.add(kWhite).str(f.color_by_channel ? "CHANNEL" : "CURRENCY");
-    l.add(kDim).str("  [H] HUD  [ESC] CLEAR/QUIT");
+    l.add(kDim).str("  [R] REHEAT  [SPACE] REPLAY: ");
+    l.add(f.replay_paused ? kWarn : kGood).str(f.replay_paused ? "PAUSED" : "ON");
+    l.add(kDim).str("  T ").fixed(f.replay_time, 1).str(" S  [H] HUD  [ESC] CLEAR/QUIT");
   }
 }
 
@@ -296,16 +292,12 @@ void HudStats::emit(HudRenderer& hud, int width, int height) const noexcept {
   emit_block(hud, select_, margin, selY, s, true);
   emit_block(hud, help_, margin, static_cast<float>(height) - margin - static_cast<float>(help_.count) * lh, s, true);
 
-  // Legend in the top-right corner with a colour swatch per hub.
+  // Hub legend in the top-right corner.
   std::size_t maxChars = 0;
   for (std::size_t i = 0; i < legend_.count; ++i) maxChars = std::max(maxChars, legend_.lines[i].chars());
   const float adv = 6.0f * s;
-  const float swatch = 8.0f * s;
-  const float lx = static_cast<float>(width) - margin - static_cast<float>(maxChars) * adv - swatch - 4.0f * s;
-  emit_block(hud, legend_, lx + swatch + 4.0f * s, margin, s, true);
-  for (std::size_t h = 0; h < legend_count_; ++h) {
-    hud.panel(lx, margin + static_cast<float>(h + 1) * lh, swatch, swatch, legend_colors_[h]);
-  }
+  const float lx = static_cast<float>(width) - margin - static_cast<float>(maxChars) * adv;
+  emit_block(hud, legend_, lx, margin, s, true);
 }
 
 }  // namespace ftv

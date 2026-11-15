@@ -14,6 +14,7 @@
 #include "ingest/int128_acc.hpp"
 #include "ingest/key_hash.hpp"
 #include "ingest/types.hpp"
+#include "ingest/whale_tracker.hpp"
 
 namespace ftv {
 
@@ -101,6 +102,7 @@ class alignas(kCacheLine) ParseWorker {
   [[nodiscard]] const WorkerStats& stats() const noexcept { return stats_; }
   [[nodiscard]] VoteTable& votes() noexcept { return votes_; }
   [[nodiscard]] EdgeTable& edges() noexcept { return edges_; }
+  [[nodiscard]] const WhaleTracker& whales() const noexcept { return whales_; }
 
   // Exposed for unit tests: validates and aggregates one row.
   bool accept_row(const RowView& row) noexcept;
@@ -115,6 +117,7 @@ class alignas(kCacheLine) ParseWorker {
   WorkerStats stats_;
   VoteTable votes_;
   EdgeTable edges_;
+  WhaleTracker whales_;
   NormalizedKey src_key_;  // scratch buffers reused for every row (no allocation)
   NormalizedKey dst_key_;
 };

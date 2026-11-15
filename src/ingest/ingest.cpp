@@ -211,6 +211,11 @@ bool run_ingest(const IngestOptions& options, ThreadPool& pool, IngestResult& ou
     st.bytes += ws.bytes;
     badOffsets.insert(badOffsets.end(), ws.malformed_offsets.begin(), ws.malformed_offsets.begin() + ws.malformed_logged);
   }
+  {
+    std::vector<WhaleCandidate> cand;
+    for (auto& w : out.workers) w->whales().for_each([&cand](const WhaleCandidate& c) { cand.push_back(c); });
+    out.whales = merge_whales(std::move(cand));
+  }
   std::sort(badOffsets.begin(), badOffsets.end());
   if (badOffsets.size() > options.log_malformed) badOffsets.resize(options.log_malformed);
   st.malformed_offsets = badOffsets;

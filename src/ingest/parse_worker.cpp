@@ -126,6 +126,8 @@ bool ParseWorker::accept_row(const RowView& row) noexcept {
   }
   e.total.add(row.amount_minor);
   ++e.count;
+  whales_.offer(WhaleCandidate{row.amount_minor, row.ts_ms, src64, dst64, row.currency,
+                               static_cast<std::uint32_t>(row.channel)});
   return true;
 }
 

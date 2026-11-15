@@ -10,10 +10,10 @@
 
 namespace ftv {
 
-enum class GpuPass : std::uint8_t { Cull = 0, Nodes, Hubs, Corridors, Edges, Pick, Hud, Count };
+enum class GpuPass : std::uint8_t { Globe = 0, Nodes, Arcs, Whales, Hubs, Pick, Post, Hud, Count };
 inline constexpr std::size_t kGpuPassCount = static_cast<std::size_t>(GpuPass::Count);
-inline constexpr std::array<const char*, kGpuPassCount> kGpuPassNames = {"CULL",  "NODES", "HUBS", "CORRIDORS",
-                                                                         "EDGES", "PICK",  "HUD"};
+inline constexpr std::array<const char*, kGpuPassCount> kGpuPassNames = {"GLOBE", "NODES", "ARCS", "WHALES",
+                                                                         "HUBS",  "PICK",  "POST", "HUD"};
 
 class GpuTimers {
  public:

@@ -34,12 +34,21 @@ void OrbitCamera::pan(float dx, float dy) noexcept {
 }
 
 void OrbitCamera::zoom(float steps) noexcept {
-  goal_distance_ = std::clamp(goal_distance_ * std::pow(0.88f, steps), 5.0f, 20000.0f);
+  goal_distance_ = std::clamp(goal_distance_ * std::pow(0.88f, steps), 2.0f, 1e5f);
 }
 
 void OrbitCamera::fly_to(const glm::vec3& target, float distance) noexcept {
   goal_target_ = target;
-  goal_distance_ = std::clamp(distance, 5.0f, 20000.0f);
+  goal_distance_ = std::clamp(distance, 2.0f, 1e5f);
+}
+
+void OrbitCamera::orbit_to(float yawRad, float pitchRad) noexcept {
+  constexpr float kTwoPi = 6.2831853f;
+  float d = std::fmod(yawRad - goal_yaw_, kTwoPi);
+  if (d > kTwoPi * 0.5f) d -= kTwoPi;
+  if (d < -kTwoPi * 0.5f) d += kTwoPi;
+  goal_yaw_ += d;
+  goal_pitch_ = std::clamp(pitchRad, -1.52f, 1.52f);
 }
 
 void OrbitCamera::update(float dt) noexcept {
@@ -49,6 +58,11 @@ void OrbitCamera::update(float dt) noexcept {
   distance_ += (goal_distance_ - distance_) * a;
   yaw_ += (goal_yaw_ - yaw_) * a;
   pitch_ += (goal_pitch_ - pitch_) * a;
+  // Never enter the globe: back off along the view direction.
+  for (int i = 0; i < 64 && min_radius_ > 0.0f && glm::length(position()) < min_radius_; ++i) {
+    distance_ *= 1.05f;
+    goal_distance_ = std::max(goal_distance_, distance_);
+  }
 }
 
 glm::vec3 OrbitCamera::position() const noexcept {

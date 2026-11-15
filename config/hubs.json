@@ -1,8 +1,16 @@
 {
-  // Macro-hub taxonomy for ftviz. Hubs without an "anchor" get the default
-  // arrangement: FIAT_CENTER hubs on a ring of radius fiat_ring_radius at y=0,
-  // CHAIN_CLOUD hubs on an elevated ring (y = chain_ring_height), phase-offset
-  // half a fiat step, and the FALLBACK hub below the centre.
+  // Macro-hub taxonomy for ftviz. Each hub has two placements:
+  //  * a layout anchor for the force solver. Hubs without an "anchor" get the
+  //    default arrangement: FIAT_CENTER hubs on a ring of radius
+  //    fiat_ring_radius at y=0, CHAIN_CLOUD hubs on an elevated ring
+  //    (y = chain_ring_height), phase-offset half a fiat step, and the
+  //    FALLBACK hub below the centre;
+  //  * a globe placement for rendering: "lat"/"lon" in degrees and
+  //    "footprint_deg", the angular radius of the hub's disc of nodes.
+  //    "label_side" (east, west, north, south; default east) moves the label
+  //    off a crowded neighbour.
+  //    Fiat centres use their city's coordinates. Chain and fallback hubs
+  //    have no geography; they are pinned to fixed points in open ocean.
   "layout": {
     "fiat_ring_radius": 1000,
     "fiat_phase_deg": 90,
@@ -34,20 +42,20 @@
   },
 
   "hubs": [
-    { "id": "NEW_YORK",   "display_name": "New York",   "type": "FIAT_CENTER", "radius": 230, "color": [0.20, 0.85, 0.45, 1.0], "k_anchor": 0.02 },
-    { "id": "LONDON",     "display_name": "London",     "type": "FIAT_CENTER", "radius": 220, "color": [0.30, 0.55, 1.00, 1.0], "k_anchor": 0.02 },
-    { "id": "FRANKFURT",  "display_name": "Frankfurt",  "type": "FIAT_CENTER", "radius": 170, "color": [0.55, 0.45, 1.00, 1.0], "k_anchor": 0.02 },
-    { "id": "ZURICH",     "display_name": "Zurich",     "type": "FIAT_CENTER", "radius": 140, "color": [0.95, 0.35, 0.45, 1.0], "k_anchor": 0.02 },
-    { "id": "TOKYO",      "display_name": "Tokyo",      "type": "FIAT_CENTER", "radius": 210, "color": [1.00, 0.30, 0.25, 1.0], "k_anchor": 0.02 },
-    { "id": "SINGAPORE",  "display_name": "Singapore",  "type": "FIAT_CENTER", "radius": 170, "color": [1.00, 0.65, 0.20, 1.0], "k_anchor": 0.02 },
-    { "id": "HONG_KONG",  "display_name": "Hong Kong",  "type": "FIAT_CENTER", "radius": 160, "color": [0.95, 0.85, 0.25, 1.0], "k_anchor": 0.02 },
+    { "id": "NEW_YORK",   "display_name": "New York",   "type": "FIAT_CENTER", "radius": 230, "lat": 40.71, "lon": -74.01, "footprint_deg": 3.0, "k_anchor": 0.02 },
+    { "id": "LONDON",     "display_name": "London",     "type": "FIAT_CENTER", "radius": 220, "lat": 51.51, "lon": -0.13, "footprint_deg": 2.0, "label_side": "west", "k_anchor": 0.02 },
+    { "id": "FRANKFURT",  "display_name": "Frankfurt",  "type": "FIAT_CENTER", "radius": 170, "lat": 50.11, "lon": 8.68, "footprint_deg": 1.4, "k_anchor": 0.02 },
+    { "id": "ZURICH",     "display_name": "Zurich",     "type": "FIAT_CENTER", "radius": 140, "lat": 47.37, "lon": 8.54, "footprint_deg": 1.1, "k_anchor": 0.02 },
+    { "id": "TOKYO",      "display_name": "Tokyo",      "type": "FIAT_CENTER", "radius": 210, "lat": 35.68, "lon": 139.69, "footprint_deg": 3.0, "k_anchor": 0.02 },
+    { "id": "SINGAPORE",  "display_name": "Singapore",  "type": "FIAT_CENTER", "radius": 170, "lat": 1.35, "lon": 103.82, "footprint_deg": 2.6, "k_anchor": 0.02 },
+    { "id": "HONG_KONG",  "display_name": "Hong Kong",  "type": "FIAT_CENTER", "radius": 160, "lat": 22.32, "lon": 114.17, "footprint_deg": 2.4, "k_anchor": 0.02 },
 
-    { "id": "BLOCKCHAIN_ETH",  "display_name": "Ethereum", "type": "CHAIN_CLOUD", "chain": "ETH",  "radius": 200, "color": [0.55, 0.60, 1.00, 1.0], "k_anchor": 0.02 },
-    { "id": "BLOCKCHAIN_BTC",  "display_name": "Bitcoin",  "type": "CHAIN_CLOUD", "chain": "BTC",  "radius": 180, "color": [1.00, 0.60, 0.10, 1.0], "k_anchor": 0.02 },
-    { "id": "BLOCKCHAIN_SOL",  "display_name": "Solana",   "type": "CHAIN_CLOUD", "chain": "SOL",  "radius": 160, "color": [0.70, 0.30, 1.00, 1.0], "k_anchor": 0.02 },
-    { "id": "BLOCKCHAIN_TRON", "display_name": "Tron",     "type": "CHAIN_CLOUD", "chain": "TRON", "radius": 150, "color": [1.00, 0.20, 0.30, 1.0], "k_anchor": 0.02 },
+    { "id": "BLOCKCHAIN_ETH",  "display_name": "Ethereum", "type": "CHAIN_CLOUD", "chain": "ETH",  "radius": 200, "lat": 36.0, "lon": -42.0, "footprint_deg": 4.0, "k_anchor": 0.02 },
+    { "id": "BLOCKCHAIN_BTC",  "display_name": "Bitcoin",  "type": "CHAIN_CLOUD", "chain": "BTC",  "radius": 180, "lat": 24.0, "lon": -158.0, "footprint_deg": 4.0, "k_anchor": 0.02 },
+    { "id": "BLOCKCHAIN_SOL",  "display_name": "Solana",   "type": "CHAIN_CLOUD", "chain": "SOL",  "radius": 160, "lat": -22.0, "lon": 72.0, "footprint_deg": 3.5, "k_anchor": 0.02 },
+    { "id": "BLOCKCHAIN_TRON", "display_name": "Tron",     "type": "CHAIN_CLOUD", "chain": "TRON", "radius": 150, "lat": -28.0, "lon": -18.0, "footprint_deg": 3.5, "k_anchor": 0.02 },
 
-    { "id": "OFFSHORE_UNRESOLVED", "display_name": "Offshore / unresolved", "type": "FALLBACK", "radius": 170, "color": [0.62, 0.62, 0.66, 1.0], "k_anchor": 0.02 }
+    { "id": "OFFSHORE_UNRESOLVED", "display_name": "Offshore / unresolved", "type": "FALLBACK", "radius": 170, "lat": -34.0, "lon": -118.0, "footprint_deg": 3.5, "k_anchor": 0.02 }
   ],
 
   // Jurisdiction -> hub. Unlisted or empty jurisdictions fall back to

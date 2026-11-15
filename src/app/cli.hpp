@@ -13,6 +13,7 @@ struct CliOptions {
   InputFormat format = InputFormat::Auto;
   std::string hubs_path;    // --hubs (default: config/hubs.json next to the binary)
   std::string render_path;  // --render (default: config/render.json next to the binary)
+  std::string theme_path;   // --theme (default: config/theme.json next to the binary)
   std::string shader_dir;   // --shaders (default: shaders/ next to the binary)
 
   unsigned threads = 0;          // --threads: total layout/merge concurrency (0 = auto)
@@ -23,7 +24,8 @@ struct CliOptions {
   bool headless = false;          // --headless: ingest + layout benchmark, no window
   unsigned layout_iters = 0;      // --layout-iters N (headless; 0 = until converged, max 5000)
   unsigned prelayout = 0;         // --prelayout N: iterations before the window opens
-  std::string screenshot;         // --screenshot out.ppm
+  std::string screenshot;         // --screenshot out.png: render offscreen (no window), write, exit
+  unsigned warmup_frames = 4;     // --warmup-frames N: frames rendered before the screenshot is taken
   unsigned frames = 0;            // --frames N: exit after N frames and print frame statistics
 
   int width = 0;                  // --width / --height override render.json
@@ -37,6 +39,9 @@ struct CliOptions {
   bool show_hud = true;           // --no-hud starts with the HUD hidden (toggle: H)
   int fly_hub = -1;               // --hub N: start focused on hub N (1-based, like the keys)
   long long select_node = -1;     // --select N: start with node N selected (1-hop highlight)
+  std::string camera_preset;      // --camera NAME (globe, london, hub:<ID>, whale, graticule)
+  float start_time = -1.0f;       // --time S: replay clock at start (< 0: preset or 0)
+  float ui_scale = 0.0f;          // --ui-scale S (0: render.json)
   float cam_yaw_deg = 0.0f;       // --camera yaw,pitch,distance (degrees, degrees, world units)
   float cam_pitch_deg = -1000.0f; // < -900 => render.json default
   float cam_distance = 0.0f;      // 0 => render.json default

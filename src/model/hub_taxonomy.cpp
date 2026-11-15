@@ -80,14 +80,25 @@ std::optional<HubTaxonomy> HubTaxonomy::from_json(const JsonValue& root, std::st
     d.type = *type;
     d.radius = static_cast<float>(h.number_or("radius", 200.0));
     d.k_anchor = static_cast<float>(h.number_or("k_anchor", 0.02));
-    float c[4] = {0.8f, 0.8f, 0.8f, 1.0f};
-    if (const JsonValue* col = h.find("color")) {
-      if (!parse_vec(col, c, 4) && !parse_vec(col, c, 3)) {
-        error = "hub '" + d.id + "' color must be [r,g,b] or [r,g,b,a]";
+    d.lat_deg = static_cast<float>(h.number_or("lat", 0.0));
+    d.lon_deg = static_cast<float>(h.number_or("lon", 0.0));
+    d.footprint_deg = static_cast<float>(h.number_or("footprint_deg", 2.0));
+    if (!(d.lat_deg >= -90.0f && d.lat_deg <= 90.0f) || !(d.lon_deg >= -180.0f && d.lon_deg <= 180.0f) ||
+        !(d.footprint_deg > 0.0f && d.footprint_deg <= 30.0f)) {
+      error = "hub '" + d.id + "' needs lat in [-90, 90], lon in [-180, 180] and footprint_deg in (0, 30]";
+      return std::nullopt;
+    }
+    {
+      const std::string side = h.string_or("label_side", "east");
+      if (side == "east") d.label_side = 0;
+      else if (side == "west") d.label_side = 1;
+      else if (side == "north") d.label_side = 2;
+      else if (side == "south") d.label_side = 3;
+      else {
+        error = "hub '" + d.id + "' has label_side '" + side + "' (expected east, west, north or south)";
         return std::nullopt;
       }
     }
-    d.color = glm::vec4(c[0], c[1], c[2], c[3]);
     float a[3] = {0, 0, 0};
     const bool hasAnchor = parse_vec(h.find("anchor"), a, 3);
     d.anchor = glm::vec3(a[0], a[1], a[2]);
@@ -130,7 +141,8 @@ std::optional<HubTaxonomy> HubTaxonomy::from_json(const JsonValue& root, std::st
     d.display_name = "Offshore / unresolved";
     d.type = HubType::Fallback;
     d.radius = 160.0f;
-    d.color = glm::vec4(0.6f, 0.6f, 0.6f, 1.0f);
+    d.lat_deg = -30.0f;
+    d.lon_deg = -120.0f;
     tax.fallback_ = static_cast<std::uint16_t>(tax.hubs_.size());
     tax.hubs_.push_back(d);
     explicitAnchor.push_back(false);

@@ -1,64 +1,53 @@
 #version 450 core
-// Pass 4: nodes as camera-facing billboards that the fragment shader turns
-// into analytic spheres. Position comes from the SSBO by gl_InstanceID; the
-// static attributes are instanced vertex attributes (divisor 1).
+// Pass 2: nodes as flat discs, 1-2.5 px wide by log(activity). The layout
+// position comes from the SSBO by gl_InstanceID and is mapped onto the globe
+// through the node's hub; the static attributes are instanced vertex
+// attributes (divisor 1).
 #include "common.glsl"
 
 layout(location = 0) in uint a_hub;
 layout(location = 1) in uint a_flags;
-layout(location = 2) in float a_size;
-layout(location = 3) in uint a_color_index;
+layout(location = 2) in float a_activity;  // log-normalised [0, 1]
 
 layout(std430, binding = 4) readonly buffer Highlight { uint highlight_bits[]; };
 
-out vec3 v_view_pos;            // fragment position on the billboard (view space)
-flat out vec3 v_center;         // sphere centre (view space)
-flat out float v_radius;
-flat out vec4 v_color;
-flat out uint v_state;          // bit0 highlighted, bit1 selected, bit2 bridge, bit3 point sprite, bit4 dimmed
-out vec2 v_uv;
+out vec2 v_px;              // fragment offset from the centre, device px
+flat out float v_radius;    // disc radius, device px
+flat out float v_alpha;
 
 const vec2 kCorners[4] = vec2[4](vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0), vec2(1.0, 1.0));
 
 void main() {
   uint id = uint(gl_InstanceID);
-  vec3 center = node_position(id);
-  vec4 vc = u_view * vec4(center, 1.0);
-  float r = a_size * u_params0.x;
+  vec3 p = globe_position(node_layout_position(id), a_hub);
+  vec4 clip = u_view_proj * vec4(p, 1.0);
 
-  uint state = 0u;
-  if ((highlight_bits[id >> 5] & (1u << (id & 31u))) != 0u) state |= 1u;
-  if (u_counts.y == id + 1u) state |= 2u;
-  if ((a_flags & 1u) != 0u) state |= 4u;
-  if (u_counts.y != 0u && (state & 3u) == 0u) state |= 16u;
-
-  // Keep far-away nodes at least ~1.5 px wide so the clusters stay readable:
-  // below that we draw a flat disc (point sprite) instead of a ray-cast sphere.
-  float depth = max(-vc.z, u_params1.w);
-  float pixelRadius = r * u_proj[1][1] * 0.5 * u_viewport.y / depth;
-  float minPx = 1.5;
-  float scale = 1.0;
-  if (pixelRadius < minPx) {
-    scale = minPx / max(pixelRadius, 1e-4);
-    state |= 8u;
+  float act = clamp(a_activity, 0.0, 1.0);
+  float act2 = act * act;  // most nodes are quiet: keep them near the alpha floor
+  float diameter = mix(u_shape0.x, u_shape0.y, act);
+  float alpha = mix(u_alpha0.x, u_alpha0.y, act2);
+  bool highlighted = (highlight_bits[id >> 5] & (1u << (id & 31u))) != 0u;
+  if (u_counts.y != 0u) {
+    if (u_counts.y == id + 1u) {
+      diameter = u_shape0.y + 1.5;
+      alpha = 0.70;
+    } else if (highlighted) {
+      diameter = max(diameter, u_shape0.y);
+      alpha = 0.60;
+    } else {
+      alpha *= 0.35;
+    }
   }
-  if ((state & 3u) != 0u) scale *= 1.6;
-
+  float radius = 0.5 * diameter * u_ink.w;
   vec2 corner = kCorners[gl_VertexID];
-  // The billboard sits on the sphere's front plane (view z + radius) so every
-  // ray-cast hit lies at or behind it. With reverse-Z the written depth is
-  // therefore <= the interpolated depth, which node.frag declares with
-  // layout(depth_less): the GREATER early depth test stays valid and occluded
-  // impostor fragments are rejected before shading. The 1.4x margin covers
-  // the perspective silhouette of the sphere.
-  float rr = r * ((state & 3u) != 0u ? 1.6 : 1.0);
-  vec3 pos = vc.xyz + vec3(corner * r * scale * 1.4, rr);
-  v_view_pos = pos;
-  v_center = vc.xyz;
-  v_radius = rr;
-  v_uv = corner * 1.4;
-  vec4 hubColor = hubs[a_color_index].color;
-  v_color = hubColor;
-  v_state = state;
-  gl_Position = u_proj * vec4(pos, 1.0);
+  float extent = radius + 1.0;  // one pixel of margin for the AA ramp
+  v_px = corner * extent;
+  v_radius = radius;
+  v_alpha = alpha;
+  if (clip.w <= u_shape1.w) {
+    gl_Position = kCulled;
+    return;
+  }
+  clip.xy += px_to_clip(corner * extent, clip.w);
+  gl_Position = clip;
 }

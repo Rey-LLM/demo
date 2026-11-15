@@ -30,10 +30,11 @@ void print_usage(const char* argv0) {
       "Usage: %s --input <transactions.csv|.ftxb> [options]\n"
       "\n"
       "Input / configuration\n"
-      "  --input PATH           CSV with header or packed .ftxb file (required)\n"
+      "  --input PATH           CSV with header or packed .ftxb file (required; alias --dataset)\n"
       "  --format auto|csv|ftxb input format (default: auto-detect)\n"
       "  --hubs PATH            hub taxonomy (default: config/hubs.json next to the binary)\n"
       "  --render PATH          render settings (default: config/render.json next to the binary)\n"
+      "  --theme PATH           palette and styling (default: config/theme.json next to the binary)\n"
       "  --shaders DIR          GLSL directory (default: shaders/ next to the binary)\n"
       "\n"
       "Threads / ingest\n"
@@ -47,7 +48,8 @@ void print_usage(const char* argv0) {
       "  --headless             ingest + layout benchmark without a window\n"
       "  --layout-iters N       headless: run N iterations (default: until converged, max 5000)\n"
       "  --prelayout N          run N layout iterations before opening the window\n"
-      "  --screenshot FILE.ppm  render, save the frame as binary PPM and exit\n"
+      "  --screenshot FILE.png  render offscreen (no window), write a PNG and exit\n"
+      "  --warmup-frames N      screenshot: frames rendered before the capture (default 4)\n"
       "  --frames N             exit after N frames and print frame-time statistics\n"
       "\n"
       "Window / view\n"
@@ -56,7 +58,10 @@ void print_usage(const char* argv0) {
       "  --msaa N               MSAA samples (1 = off)\n"
       "  --hub N                start focused on hub N (1-based)\n"
       "  --select NODE          start with node NODE (dense index) selected and framed\n"
+      "  --camera PRESET        globe | london | hub:<ID> | whale | graticule\n"
       "  --camera Y,P,D         start camera yaw/pitch in degrees and distance\n"
+      "  --time S               replay clock at start, seconds (default: preset, else 0)\n"
+      "  --ui-scale S           device pixels per logical pixel for discs, rings, labels\n"
       "  --no-detail            start with individual inter-hub edges hidden (toggle: E)\n"
       "  --paused               start with the layout paused (toggle: L)\n"
       "  --no-hud               start with the HUD hidden (toggle: H)\n"
@@ -65,7 +70,7 @@ void print_usage(const char* argv0) {
       "\n"
       "Controls: left-drag orbit, right/middle-drag pan, wheel zoom, click select,\n"
       "  1-9 fly to hub, 0 overview, F frame selection, E inter-hub edge detail,\n"
-      "  L pause/resume layout, R reheat layout, C colour by currency/channel,\n"
+      "  L pause/resume layout, R reheat layout, Space pause/resume replay,\n"
       "  H toggle HUD, Esc clear selection / quit.\n",
       argv0);
 }
@@ -108,7 +113,7 @@ bool parse_cli(int argc, char** argv, CliOptions& o, std::string& error) {
 
     if (a == "-h" || a == "--help") {
       o.help = true;
-    } else if (a == "--input" || a == "-i") {
+    } else if (a == "--input" || a == "-i" || a == "--dataset") {
       if (!str(o.input)) return false;
     } else if (a == "--format") {
       std::string_view v;
@@ -127,6 +132,19 @@ bool parse_cli(int argc, char** argv, CliOptions& o, std::string& error) {
       if (!str(o.hubs_path)) return false;
     } else if (a == "--render") {
       if (!str(o.render_path)) return false;
+    } else if (a == "--theme") {
+      if (!str(o.theme_path)) return false;
+    } else if (a == "--warmup-frames") {
+      if (!uns(o.warmup_frames)) return false;
+    } else if (a == "--time" || a == "--ui-scale") {
+      std::string_view v;
+      if (!value(v)) return false;
+      float f = 0.0f;
+      if (!parse_float(v, f) || !(f >= 0.0f) || (a == "--ui-scale" && (f < 0.5f || f > 4.0f))) {
+        error = std::string("invalid value for ") + std::string(a);
+        return false;
+      }
+      (a == "--time" ? o.start_time : o.ui_scale) = f;
     } else if (a == "--shaders") {
       if (!str(o.shader_dir)) return false;
     } else if (a == "--threads") {
@@ -176,6 +194,10 @@ bool parse_cli(int argc, char** argv, CliOptions& o, std::string& error) {
     } else if (a == "--camera") {
       std::string_view v;
       if (!value(v)) return false;
+      if (v.find(',') == std::string_view::npos) {
+        o.camera_preset.assign(v);
+        continue;
+      }
       float vals[3] = {0, 0, 0};
       std::size_t start = 0;
       for (int k = 0; k < 3; ++k) {
