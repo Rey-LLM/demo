@@ -154,6 +154,9 @@ check_ipo_supported(RESULT FTVIZ_IPO_OK OUTPUT FTVIZ_IPO_MSG LANGUAGES CXX)
 function(ftviz_target_defaults tgt)
   if(MSVC)
     target_compile_options(${tgt} PRIVATE /W4 /permissive- /Zc:__cplusplus /utf-8 /EHsc)
+    # C4324 only reports padding added by our own alignas(64) (false-sharing
+    # guards); the padding is the point.
+    target_compile_options(${tgt} PRIVATE /wd4324)
     target_compile_definitions(${tgt} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
     if(FTVIZ_WERROR)
       target_compile_options(${tgt} PRIVATE /WX)

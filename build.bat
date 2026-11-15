@@ -35,6 +35,8 @@ if errorlevel 1 (
   %PY% -m pip install --user jinja2 || (echo [build] Python 3 with pip is required. & goto :fail)
 )
 
+for /f "usebackq tokens=*" %%i in (`%PY% -c "import sys; print(sys.executable)"`) do set "PYEXE=%%i"
+
 rem --- 3. Static OpenSSL via vcpkg --------------------------------------------
 if not defined VCPKG_ROOT set "VCPKG_ROOT=%CD%\vcpkg"
 if not exist "%VCPKG_ROOT%\vcpkg.exe" (
@@ -50,7 +52,8 @@ echo [build] vcpkg install openssl:x64-windows-static (first run takes a few min
 rem --- 4. Configure, build, test ----------------------------------------------
 cmake -S . -B build-win -G "Visual Studio 17 2022" -A x64 ^
   -DFTVIZ_STATIC=ON -DFTVIZ_BUILD_TOOLS=OFF ^
-  -DOPENSSL_ROOT_DIR="%VCPKG_ROOT%\installed\x64-windows-static" || goto :fail
+  -DOPENSSL_ROOT_DIR="%VCPKG_ROOT%\installed\x64-windows-static" ^
+  -DPython_EXECUTABLE="%PYEXE%" || goto :fail
 cmake --build build-win --config Release --parallel || goto :fail
 ctest --test-dir build-win -C Release --output-on-failure || echo [build] WARNING: some tests failed, see above.
 

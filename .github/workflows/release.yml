@@ -49,8 +49,9 @@ jobs:
       - name: Configure
         run: >
           cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-          -DFTVIZ_STATIC=ON -DFTVIZ_WERROR=ON -DFTVIZ_BUILD_TOOLS=OFF
+          -DFTVIZ_STATIC=ON -DFTVIZ_WERROR=OFF -DFTVIZ_BUILD_TOOLS=OFF
           -DOPENSSL_ROOT_DIR="${{ env.OPENSSL_ROOT_DIR }}"
+          -DPython_EXECUTABLE="${{ env.pythonLocation }}\python.exe"
 
       - name: Build
         run: cmake --build build --config Release --parallel

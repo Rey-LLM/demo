@@ -1,41 +1,72 @@
 # ftviz
 
 A C++20 / OpenGL 4.5 visualizer for financial flows on a dark globe:
-transaction graphs from a file, public crypto feeds live, modeled fiat
-corridors, and the largest transfers in gold.
+public crypto feeds live, ECB reference rates, modeled fiat corridors,
+optional transaction graphs from a file, and the largest transfers burning
+from deep amber to white gold. One self-contained executable: shaders,
+coastlines, configuration and the replay capture are compiled in.
 
-![The globe with coastlines, hub flows as great-circle hairlines, whale transfers in gold, feed rows top left and the replay timeline at the bottom](docs/screenshots/hero_globe.png)
+![The globe with coastlines, hub flows as great-circle hairlines, amber flow trails and white-gold whales, feed rows and the whale tape top left, the replay timeline at the bottom](docs/screenshots/hero_globe.png)
+
+## Download and run (Windows)
+
+1. Open the repository's **Releases** page (or the latest run of the
+   `release` workflow under **Actions**) and download `ftviz.exe`.
+2. Double-click it. No installer, no DLLs, no folders next to it.
+
+The globe opens and connects to every public feed. Feeds that connect turn
+LIVE in the top-left HUD; if the machine is offline, after 15 s the bundled
+capture plays and every row says REPLAY. Windows SmartScreen may warn on
+first launch because the exe is unsigned ("More info" → "Run anyway").
+
+Requirements: 64-bit Windows 10 or 11 and a GPU driver with OpenGL 4.5
+(any NVIDIA, AMD or Intel driver from the last several years; 4.3 with
+`ARB_direct_state_access`, `ARB_buffer_storage` and `ARB_clip_control`
+also works). Started from a terminal, `ftviz.exe --help` lists every option
+and log output appears in that terminal.
+
+macOS is not supported: Apple's OpenGL stops at 4.1. On Linux, build from
+source (below); the binary depends only on libc and libm.
 
 ## Features
 
-- **Globe.** Natural Earth coastlines, a 15° graticule and a thin amber
-  rim. Arcs fade with depth and are hidden behind the globe.
-- **Four colours.** Obsidian `#050608`, amber `#C8962E`, ink `#D9DCE1`, and
-  neon gold `#FFC23D` for whales only. Only whales glow.
-- **Live feeds.** Bitcoin, Ethereum, Solana, Coinbase and Kraken over
-  public WebSocket endpoints, each with a state, a rate and a drop count
-  on screen.
+- **Globe.** Natural Earth coastlines, a 15° graticule, an amber
+  atmosphere rim with a Fresnel falloff, hubs that glow and pulse softly.
+  Arcs fade with depth and are hidden behind the globe.
+- **Plasma trails.** Every live trade or transfer of at least 2,500 USD
+  between two hubs is a short amber trail; whales (per feed USD
+  thresholds) are brighter HDR ribbons whose head and core heat from Deep
+  Amber `#FF9A1F` to White Gold `#FFF1C9`. Obsidian `#050608` background,
+  amber `#C8962E` lines, ink `#D9DCE1` for everything else.
+- **Live feeds by default.** Bitcoin, Ethereum, Solana, Coinbase, Kraken
+  and Binance over public WebSocket endpoints, ECB rates over HTTPS. Each
+  feed reconnects with jittered backoff and rotates through fallback URLs
+  when DNS, TCP or TLS fails.
+- **HUD.** LIVE x/y streams and total TX/s, a row per feed with state,
+  rate, latency and drops, the ECB date and EURUSD, a scrolling tape of the
+  last eight whales, a hub panel on click, an EXPORT button.
 - **Honest labels.** Every source is LIVE, DELAYED, MODELED or REPLAY
-  wherever it appears: HUD, hub panel, exports.
-- **Replay.** A capture plays on a seekable timeline. A feed that is down
-  for 15 s falls back to it and says so.
-- **Export.** One key writes the session to five CSV and JSON files.
+  wherever it appears: HUD, hub panel, whale tape, exports.
+- **Offline fallback.** Only when no feed is LIVE (the machine is
+  offline) does the bundled capture play, labelled REPLAY.
+- **Export.** One key or click writes the session to five CSV and JSON files.
 - **Interaction.** Hover and pin hubs, five camera presets, pause, scrub.
 - **Fixed frame.** 8 scene draws and 8 post draws per frame whatever the
-  data; no `glDrawElements`; zero heap allocations per frame on the
-  render, model and layout threads (asserted in Debug builds).
+  data; zero heap allocations per frame on the render, model and layout
+  threads (asserted in Debug builds).
 - **Deterministic screenshots.** `--screenshot` renders offscreen; the
   same command gives the same bytes.
 
 ## Gallery
 
-Engine frames at 3840×2160, from the commands under
-[Screenshots](#screenshots). The capture they replay is synthetic.
+Engine frames at 3840×2160 from the commands under
+[Screenshots](#screenshots). They replay the bundled capture, which is
+synthetic: the build machine could not reach the live endpoints.
 
 | | |
 |---|---|
-| ![London pinned: the hub panel with inflow, outflow, net and top counterparties, labelled MODELED + REPLAY](docs/screenshots/hub_panel_london.png) | ![Whale transfers in gold travelling their arcs](docs/screenshots/whale_event.png) |
-| Hub panel, London pinned | Whale transfers in flight |
+| ![London pinned: the hub panel with inflow, outflow, net and top counterparties, labelled MODELED + REPLAY](docs/screenshots/hub_panel_london.png) | ![Whales in white gold and flow trails in amber travelling their arcs](docs/screenshots/whale_event.png) |
+| Hub panel, London pinned | Whales and flow trails in flight |
 | ![Coastlines of Australia, New Zealand and Antarctica under the amber graticule](docs/screenshots/graticule_coastline.png) | ![The replay timeline paused at 01:40 of 02:00](docs/screenshots/replay_timeline.png) |
 | Graticule and coastlines | Replay timeline |
 
@@ -46,38 +77,66 @@ Requirements:
 - CMake 3.20 or newer and Git (FetchContent clones the pinned
   dependencies: GLFW 3.4, glad 2.0.8, GLM 1.0.1, xxHash 0.8.3,
   simdjson 3.10.1 and stb_image_write).
-- OpenSSL 1.1.1 or newer (`libssl-dev`), for the TLS feeds.
+- OpenSSL 1.1.1 or newer, for the TLS feeds (static libraries for a
+  standalone binary).
 - A C++20 compiler: MSVC 2022, GCC 12+ or Clang 15+.
 - For the application: Python 3 with `jinja2` (glad generates its loader at
-  build time) and an OpenGL 4.5 driver. 4.3 also works with
-  `ARB_direct_state_access`, `ARB_buffer_storage` and `ARB_clip_control`.
+  build time).
+
+### Windows, one click
+
+Install Visual Studio 2022 (or the Build Tools) with "Desktop development
+with C++", Git and Python 3, then double-click `build.bat`. It sets up the
+compiler environment, installs `jinja2` if missing, clones vcpkg if
+`VCPKG_ROOT` is not set, installs `openssl:x64-windows-static`, builds
+Release with `/MT`, runs the tests and copies the result to
+`dist\ftviz.exe`.
+
+The same build by hand:
+
+```bat
+vcpkg install openssl:x64-windows-static
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DOPENSSL_ROOT_DIR=%VCPKG_ROOT%\installed\x64-windows-static
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
+```
+
+### Windows from Linux (MinGW-w64)
+
+```sh
+cmake -S . -B build-win -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw-w64-x86_64.cmake \
+  -DOPENSSL_ROOT_DIR=<static OpenSSL built for mingw64> -DCMAKE_BUILD_TYPE=Release
+cmake --build build-win -j
+```
 
 ### Linux
 
 ```sh
-sudo apt install libssl-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libegl-dev
+sudo apt install libssl-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libegl-dev python3-jinja2
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-`libegl-dev` is optional. With it, `--screenshot` and the render test use a
-surfaceless EGL context and need no display; without it they open a hidden
-window.
+`libegl-dev` is optional (headers only; libEGL is loaded at run time). With
+it, `--screenshot` and the render test use a surfaceless EGL context and
+need no display.
 
-### Windows (Visual Studio 2022)
+### CI
 
-```bat
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
-```
+`.github/workflows/release.yml` runs on every push to `main`:
 
-`shaders/`, `config/` and `assets/` are copied next to the `ftviz` binary, so it runs
-from the build directory.
+- **Windows x64**: MSVC 2022, `/MT`, static OpenSSL from vcpkg, warnings as
+  errors, unit tests, then uploads `ftviz.exe` as a workflow artifact and
+  publishes it as a GitHub Release tagged `build-<run number>`.
+- **Linux x64**: GCC with `-Werror`, unit and render tests under Mesa, and
+  a 450-frame smoke run from an empty folder that prints which live feeds
+  the runner reached.
 
 | CMake option | Default | Effect |
 |---|---|---|
+| `FTVIZ_STATIC` | ON | Static C/C++ runtime (`/MT`, `-static` on MinGW, static libstdc++ on Linux) and static OpenSSL |
+| `FTVIZ_WIN32_GUI` | ON | Windows: GUI subsystem, no console window on double-click |
 | `FTVIZ_BUILD_APP` | ON | OpenGL application and render test |
 | `FTVIZ_BUILD_TESTS` | ON | `ftviz_tests` (no GPU needed) and `ftviz_render_tests` |
 | `FTVIZ_BUILD_TOOLS` | ON | `gen_synthetic` and `gen_capture` generators |
@@ -90,18 +149,26 @@ To build without network access, point FetchContent at local checkouts with
 `XXHASH`, `SIMDJSON` and `STB`. `-DFTVIZ_BUILD_APP=OFF` builds the ingest, model,
 layout and their tests without any GL dependency.
 
+### What is inside the binary
+
+Every file in `shaders/`, `config/` (hubs, render, theme, feeds, corridor
+baseline), both coastline layers and `assets/replay/default.ftxcap` is
+compiled in as a `constexpr` byte array. To try a changed shader or config
+without rebuilding, pass `--data-dir <repo>` (or `--theme`, `--feeds`,
+`--shaders` and so on); files given that way win over the embedded copies.
+
 ## Usage
 
 ```sh
-./build/gen_synthetic --rows 300000 --out tx.csv --seed 42
-./build/ftviz --input tx.csv --prelayout 300              # graph + modeled corridors
-./build/ftviz --input tx.csv --live                       # public feeds
-./build/ftviz --input tx.csv --replay                     # bundled capture, seekable
-./build/ftviz --input tx.csv --live --export out --export-after 60   # export after 60 s, exit
+ftviz                                        # globe + live feeds (same as double-click)
+ftviz --no-live                              # no network: modeled corridors only
+ftviz --replay                               # bundled synthetic capture on a seekable timeline
+ftviz --input tx.csv --prelayout 300         # add a transaction graph from a file
+ftviz --export out --export-after 60         # export after 60 s, then exit
 ```
 
-`--input` is always required: the transaction graph is the scene's base
-layer. `./build/ftviz --help` lists every option.
+`ftviz --help` lists every option. `gen_synthetic --rows 300000 --out tx.csv`
+makes a test graph.
 
 | Input | Action |
 |---|---|
@@ -124,8 +191,9 @@ Configuration, all with `//` comments allowed:
 
 - `config/hubs.json`: hubs, jurisdiction map, force constants.
 - `config/render.json`: window, edge budgets, globe, replay, camera.
-- `config/theme.json`: the four colours and every alpha and width.
-- `config/feeds.json`: endpoints, labels, request limits, whale thresholds.
+- `config/theme.json`: the colours and every alpha and width.
+- `config/feeds.json`: endpoints and fallback URLs, labels, request limits,
+  whale and trail thresholds, fallback policy.
 - `config/flows_baseline.csv`: the modeled fiat corridors and their source.
 
 ### Input format
@@ -170,20 +238,34 @@ renderer requests 8× and uses the driver's maximum when it is lower.
 | Solana | DELAYED | `api.mainnet-beta.solana.com` | up to 32 sampled transfers per block, 32 slots behind the tip |
 | Coinbase | LIVE | `wss://ws-feed.exchange.coinbase.com` | trades (`matches`) |
 | Kraken | LIVE | `wss://ws.kraken.com/v2` | trades |
+| Binance | LIVE | `wss://stream.binance.com:9443/stream` (fallbacks: port 443, `data-stream.binance.vision`) | aggregated trades, BTC/ETH/SOL against USDT and EUR |
+| FX rates | DELAYED | `https://api.frankfurter.dev/v1/latest` (fallback `api.frankfurter.app`) | ECB daily reference rates, polled every 15 min |
 | Fiat corridors | MODELED | none | flat per-second flows derived from BIS Triennial Survey 2022 shares |
-| Capture | REPLAY | `assets/replay/default.ftxcap` | `--replay`, or any feed that has been down for 15 s |
+| Capture | REPLAY | embedded `assets/replay/default.ftxcap` | `--replay`, or every feed while the machine is offline |
 
-- The endpoints are public and need no key. TLS verification is always on.
-- Fiat flows are never observed. They are a model and are labelled MODELED.
+- The endpoints are public and need no key. TLS verification is always on
+  (Windows: the system ROOT certificate store).
+- `stream.binance.com` refuses US IP addresses (HTTP 451). The feed then
+  rotates to its fallback URLs; on the CI runner it was refused twice and
+  then went LIVE on a fallback. If every URL is refused, the feed stays
+  OFFLINE and the others carry on.
+- **BIS:** there is no real-time BIS feed; the BIS publishes survey data,
+  not a stream. Fiat flows are therefore a model of the 2022 survey shares,
+  never observed, and labelled MODELED.
+- **ETF flows** are not included: no zero-auth real-time endpoint was found.
 - The bundled capture is **synthetic**, generated by `tools/gen_capture.cpp`
   with a fixed seed. It is not recorded market data, and the timeline and
   `session.json` say so.
 - USD values use prices from the same feeds. Trades in EUR, GBP or JPY are
-  valued through the cross rate implied by the same exchange.
+  valued through the exchange's own cross rate, or the ECB rate when no
+  exchange price is fresh. USDT is valued at Kraken's USDT/USD price, or at
+  1.00 until that arrives.
+- Latency is the average of local receive time minus the provider's event
+  timestamp, so it includes any clock difference between the two machines.
 - Exchange trades are drawn between the chain hub and the hub of the quote
-  currency's home market (USD: New York, EUR: Frankfurt, GBP: London, JPY:
-  Tokyo). This is a display convention, not a statement of where the
-  counterparties are.
+  currency's home market (USD and USDT: New York, EUR: Frankfurt, GBP:
+  London, JPY: Tokyo). This is a display convention, not a statement of
+  where the counterparties are.
 - Solana USD volume covers the sampled transfers only; nothing is
   extrapolated.
 
@@ -226,8 +308,9 @@ with 4× MSAA and the 300,000-row dataset, a v2 frame took 404.9 ms mean
 timings are in DESIGN_NOTES §10.1. These numbers do not predict GPU frame
 rates.
 
-Allocations, Debug build, 110 frames in `--replay`: 0 on the render thread
-in our code, 0 on the model thread.
+Allocations, v3 Debug build, 110 frames in `--replay` and 400 frames in
+the default live mode (feeds blocked, falling back to replay): 0 on the
+render thread in our code, 0 on the model thread.
 
 ## Tests
 
@@ -235,16 +318,42 @@ in our code, 0 on the model thread.
 ctest --test-dir build --output-on-failure
 ```
 
-- `ftviz_tests` (81 tests, no GPU, no network): ingest, layout, feed
-  parsers against hand-written fixtures in the providers' documented
-  formats, rings, backoff, the feed state machine and fallback, model determinism and seek, export golden files,
-  picking and camera presets.
+- `ftviz_tests` (87 tests, no GPU, no network): ingest, layout, feed
+  parsers (including Binance and ECB) against hand-written fixtures in the
+  providers' documented formats, rings, backoff, the feed state machine
+  and fallback policy, the shipped feeds.json, model determinism and seek,
+  export golden files, the embedded files byte for byte against the source
+  tree, picking and camera presets.
 - `ftviz_render_tests` (5 cases, offscreen): background colour, hue
-  clusters, emissive only on whales, coastline pixels, atmosphere rim,
-  a live whale arc. It
-  reports SKIP without an OpenGL 4.5 context.
+  clusters, emissive only on whales and hub glow, coastline pixels,
+  atmosphere rim, a live whale arc. It reports SKIP without an OpenGL 4.5
+  context.
 
-Live feeds are not exercised by the tests.
+The tests do not touch the network. The CI smoke run is the only check of
+the live feeds (see [Verification](#verification)).
+
+## Verification
+
+What was checked for v3, and how:
+
+| Check | Result |
+|---|---|
+| Linux, GCC 13, Release, `-DFTVIZ_WERROR=ON` | clean; 87/87 unit tests, 5/5 render tests (Mesa llvmpipe) |
+| Linux binary from an empty folder, no arguments | opens the globe from embedded resources; `ldd` shows libc and libm only |
+| Live feeds (GitHub Actions `ubuntu-24.04` runner) | BTC, BTC_BLOCKS, ETH, Coinbase, Kraken and Binance reached LIVE, FX fetched ECB rates; Solana answered HTTP 429 (shared runner IPs) and stayed RATE_LIMITED |
+| Offline fallback (cloud VM whose proxy blocks every feed host) | all feeds OFFLINE, then REPLAY after 15 s |
+| Windows exe, MinGW-w64 cross-build | zero warnings; imports only system DLLs; 87/87 unit tests and an offscreen render under Wine, TLS verified against the Windows root store under Wine |
+| Windows exe, MSVC `/MT` | WINDOWS_CI_RESULT |
+| Debug zero-allocation assertion | 0 allocations per frame on the render and model threads, replay and live modes |
+
+Not verified:
+
+- The exe on a real Windows machine with a real GPU driver (only Wine with
+  Mesa llvmpipe and the CI runner, which has no OpenGL 4.5).
+- Frame rates on a discrete GPU, and 8× MSAA: the software renderer caps
+  at 4×, so the screenshots use 4×.
+- Live feeds from the build VM; they were checked only from the CI runner,
+  for a few seconds.
 
 ## Attribution
 
