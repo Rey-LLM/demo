@@ -647,7 +647,7 @@ TEST_CASE("presets: 1-5 end exactly on their views after the 1.2 s eased flight"
   const auto tax = HubTaxonomy::load(kSrc + "/config/hubs.json", err);
   REQUIRE(tax.has_value());
   RenderSettings rs;
-  CHECK(kPresetFlightSeconds == 1.2f);
+  static_assert(kPresetFlightSeconds == 1.2f);
   const CameraPose globe = view_preset(1, *tax, rs);
   CHECK_EQ(globe.distance, rs.camera_start_distance);
   CHECK(std::fabs(globe.yaw - rs.camera_start_yaw_deg * kDegToRad) < 1e-6f);

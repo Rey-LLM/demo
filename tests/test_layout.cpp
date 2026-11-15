@@ -37,8 +37,9 @@ Graph make_graph(const HubTaxonomy& tax, std::size_t n) {
     ++g.hub_population[g.nodes.hub[i]];
   }
   std::vector<std::pair<std::uint32_t, std::uint32_t>> pairs;
-  for (std::size_t i = 0; i + 5 < n; ++i) pairs.emplace_back(i, i + 5);         // intra-hub chains
-  for (std::size_t i = 0; i + 1 < n; i += 50) pairs.emplace_back(i, i + 1);     // inter-hub
+  const auto u32 = [](std::size_t v) { return static_cast<std::uint32_t>(v); };
+  for (std::size_t i = 0; i + 5 < n; ++i) pairs.emplace_back(u32(i), u32(i + 5));      // intra-hub chains
+  for (std::size_t i = 0; i + 1 < n; i += 50) pairs.emplace_back(u32(i), u32(i + 1));  // inter-hub
   g.edges.resize(pairs.size());
   for (std::size_t e = 0; e < pairs.size(); ++e) {
     g.edges.src[e] = pairs[e].first;
