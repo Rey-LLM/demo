@@ -2,3 +2,4 @@ tests/golden/** -text
 *.ftxcap binary
 *.bin binary
 *.png binary
+*.bat text eol=crlf

@@ -1,5 +1,7 @@
 #include "render/coastlines.hpp"
 
+#include "core/file_util.hpp"
+
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -19,12 +21,12 @@ bool read_u32(const std::vector<char>& b, std::size_t& at, std::uint32_t& v) {
 }  // namespace
 
 long long load_coastline_file(const std::string& path, std::vector<CoastSegment>& out, std::string& error) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f) {
+  const auto file = read_text_file(path);  // a path on disk or an embedded resource
+  if (!file) {
     error = "cannot open " + path;
     return -1;
   }
-  const std::vector<char> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  const std::vector<char> b(file->begin(), file->end());
   std::size_t at = 0;
   std::uint32_t version = 0, polylines = 0, points = 0;
   if (b.size() < 16 || std::memcmp(b.data(), "FTCL", 4) != 0) {

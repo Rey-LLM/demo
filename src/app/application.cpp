@@ -24,6 +24,7 @@
 #include "app/live_session.hpp"
 #include "app/render_config.hpp"
 #include "core/alloc_counter.hpp"
+#include "core/embedded_fs.hpp"
 #include "core/fixed_text.hpp"
 #include "core/log.hpp"
 #include "core/thread_pool.hpp"
@@ -73,15 +74,12 @@ void gl_pre_call_hook(const char*, GLADapiproc, int, ...) { enter_foreign_code()
 void gl_post_call_hook(void*, const char*, GLADapiproc, int, ...) { leave_foreign_code(); }
 #endif
 
-// First existing path among: explicit option, <exe>/<rel>, <source>/<rel>.
-std::string resolve_path(const std::string& explicitPath, const std::string& exeDir, const char* rel) {
+// An explicit option wins, then --data-dir/<rel>, then the copy compiled
+// into the binary. Nothing next to the executable is ever required.
+std::string resolve_path(const std::string& explicitPath, const std::string& dataDir, const char* rel) {
   if (!explicitPath.empty()) return explicitPath;
-  std::error_code ec;
-  const fs::path candidates[] = {fs::path(exeDir) / rel, fs::path(FTVIZ_SOURCE_DIR) / rel, fs::path(rel)};
-  for (const fs::path& c : candidates) {
-    if (fs::exists(c, ec)) return c.string();
-  }
-  return (fs::path(exeDir) / rel).string();
+  if (!dataDir.empty()) return (fs::path(dataDir) / rel).string();
+  return embedded_path(rel);
 }
 
 void print_ingest_report(const IngestResult& in, const std::string& path) {
@@ -1016,12 +1014,13 @@ int run_application(const CliOptions& cli, const std::string& exeDir) {
   std::string err;
 
   // ---- configuration ---------------------------------------------------------
-  const std::string hubsPath = resolve_path(cli.hubs_path, exeDir, "config/hubs.json");
-  const std::string renderPath = resolve_path(cli.render_path, exeDir, "config/render.json");
-  const std::string themePath = resolve_path(cli.theme_path, exeDir, "config/theme.json");
-  const std::string shaderDir = resolve_path(cli.shader_dir, exeDir, "shaders");
-  const std::string feedsPath = resolve_path(cli.feeds_path, exeDir, "config/feeds.json");
-  const std::string assetsDir = resolve_path(std::string(), exeDir, "assets");
+  (void)exeDir;
+  const std::string hubsPath = resolve_path(cli.hubs_path, cli.data_dir, "config/hubs.json");
+  const std::string renderPath = resolve_path(cli.render_path, cli.data_dir, "config/render.json");
+  const std::string themePath = resolve_path(cli.theme_path, cli.data_dir, "config/theme.json");
+  const std::string shaderDir = resolve_path(cli.shader_dir, cli.data_dir, "shaders");
+  const std::string feedsPath = resolve_path(cli.feeds_path, cli.data_dir, "config/feeds.json");
+  const std::string assetsDir = resolve_path(std::string(), cli.data_dir, "assets");
 
   auto taxonomy = HubTaxonomy::load(hubsPath, err);
   if (!taxonomy) {
@@ -1073,13 +1072,20 @@ int run_application(const CliOptions& cli, const std::string& exeDir) {
   io.chunk_bytes = cli.chunk_mb << 20;
   io.log_malformed = cli.log_malformed;
   IngestResult ingest;
-  if (!run_ingest(io, pool, ingest, err)) {
+  const bool haveInput = !cli.input.empty();
+  if (haveInput && !run_ingest(io, pool, ingest, err)) {
     FTV_LOG_ERROR("ingest failed: %s", err.c_str());
     return 1;
   }
+  // Without --input the graph is empty: the globe, hubs, coastlines and the
+  // live layer (feeds, modeled corridors, whales) are the whole picture.
   EdgeList edges = aggregate_edges(ingest, pool);
-  print_ingest_report(ingest, cli.input);
-  if (ingest.entity_count() == 0) {
+  if (haveInput) {
+    print_ingest_report(ingest, cli.input);
+  } else {
+    std::printf("[ingest] no --input: globe and live layer only\n");
+  }
+  if (haveInput && ingest.entity_count() == 0) {
     FTV_LOG_ERROR("no valid transactions in %s; nothing to visualise", cli.input.c_str());
     return 1;
   }
@@ -1111,7 +1117,7 @@ int run_application(const CliOptions& cli, const std::string& exeDir) {
   lo.mode = cli.live ? ModelMode::Live : cli.replay ? ModelMode::Replay : ModelMode::Dataset;
   lo.feeds_path = feedsPath;
   lo.capture_path = cli.replay_path;
-  lo.base_dir = fs::path(feedsPath).parent_path().parent_path().string();
+  lo.base_dir = is_embedded_path(feedsPath) ? std::string() : fs::path(feedsPath).parent_path().parent_path().string();
   lo.export_dir = cli.export_dir;
   std::unique_ptr<LiveSession> live = LiveSession::create(lo, *taxonomy, err);
   if (!live) {
@@ -1122,6 +1128,7 @@ int run_application(const CliOptions& cli, const std::string& exeDir) {
     FTV_LOG_WARN("live layer disabled (modeled corridors, hub panel and export unavailable): %s", err.c_str());
   } else {
     std::printf("[live] mode %s, feeds %s\n", kModelModeNames[static_cast<std::size_t>(lo.mode)], feedsPath.c_str());
+    live->set_arc_lifetime(rs.theme.whale_flight_s + rs.theme.whale_flash_s);
   }
 
   LayoutEngine engine(solver, graph.node_count());
@@ -1140,7 +1147,7 @@ int run_application(const CliOptions& cli, const std::string& exeDir) {
     live->start();
   }
 
-  const std::string inputName = fs::path(cli.input).filename().string();
+  const std::string inputName = haveInput ? fs::path(cli.input).filename().string() : std::string("live");
   int code = 0;
   {
     Viewer viewer(cli, rs, shaderDir, graph, *taxonomy, whales, coast, ingest, engine, live.get(), inputName);

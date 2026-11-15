@@ -1,7 +1,9 @@
 #pragma once
-// HUD elements of the live layer: one status row per feed, the EXPORT text
-// button and its toast, the pinned hub's panel and the replay timeline.
-// Monochrome Ink at three alphas plus Amber for the timeline; no boxes.
+// HUD elements of the live layer: a summary line (live streams, total
+// transactions per second), one status row per feed (state, rate, latency),
+// the whale tape, the EXPORT text button and its toast, the pinned hub's
+// panel and the replay timeline. Monochrome Ink at three alphas plus Amber
+// for the timeline and tier-3 whales; no boxes.
 //
 // refresh() formats text into fixed buffers at 4 Hz from the latest model
 // snapshot; emit() writes glyphs every frame. Neither allocates.
@@ -60,6 +62,9 @@ class LiveHud {
 
   // Text of feed row `f` (tests / console report).
   [[nodiscard]] std::string_view feed_row(std::size_t f) const noexcept { return rows_[f].text.view(); }
+  [[nodiscard]] std::string_view summary() const noexcept { return summary_.view(); }
+  [[nodiscard]] std::string_view tape_line(std::size_t i) const noexcept { return tape_[i].text.view(); }
+  [[nodiscard]] std::size_t tape_lines() const noexcept { return tape_lines_; }
 
  private:
   struct Row {
@@ -70,7 +75,14 @@ class LiveHud {
   ModelMode mode_;
   const LiveFeeds* feeds_;
   const FeedsConfig* config_;
+  struct TapeLine {
+    FixedText<96> text;
+    std::uint8_t tier = 1;
+  };
   std::array<Row, kFeedCount> rows_{};
+  FixedText<96> summary_;
+  std::array<TapeLine, LiveSnapshot::kTapeLength> tape_{};
+  std::size_t tape_lines_ = 0;
   std::array<FixedText<96>, 12> panel_{};
   std::size_t panel_lines_ = 0;
   FixedText<96> timeline_text_;

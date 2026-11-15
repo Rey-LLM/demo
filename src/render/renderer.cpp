@@ -532,7 +532,7 @@ void Renderer::draw_frame(const FrameParams& p) {
     }
     for (const LiveArcSlot& l : live_master_) {
       const float age = p.live_time - l.start;
-      if (l.used && age > 0.0f && age < span) ++active;
+      if (l.used && l.tier > 0 && age > 0.0f && age < span) ++active;  // flow trails are not whales
     }
     counters_.active_whales = active;
   }
@@ -564,6 +564,7 @@ void Renderer::draw_frame(const FrameParams& p) {
   u.atmo1 = glm::vec4(th.atmo_exponent, th.atmo_scale, p.live_time, 0.0f);
   u.pick = glm::uvec4(p.hovered_hub >= 0 ? static_cast<std::uint32_t>(p.hovered_hub) + 1u : 0u,
                       p.pinned_hub >= 0 ? static_cast<std::uint32_t>(p.pinned_hub) + 1u : 0u, kLiveArcSlots, p.layers);
+  u.gold_hot = glm::vec4(th.whale_hot[0], th.whale_hot[1], th.whale_hot[2], 0.0f);
   std::memcpy(static_cast<char*>(uniforms_.data()) + static_cast<std::size_t>(ubo_region_bytes_) * slot_, &u, sizeof(u));
   std::memcpy(static_cast<char*>(live_arcs_.data()) + static_cast<std::size_t>(live_region_bytes_) * slot_,
               live_master_.data(), sizeof(LiveArcSlot) * kLiveArcSlots);
@@ -677,8 +678,10 @@ void Renderer::draw_frame(const FrameParams& p) {
   glColorMaski(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
   timers_.end();
 
-  // Pass 5 - hub markers and labels (screen space, no depth test).
+  // Pass 5 - hub markers and labels (screen space, no depth test). Markers
+  // also write a small glow to the emissive attachment.
   timers_.begin(slot_, GpuPass::Hubs);
+  glColorMaski(1, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
   glDisable(GL_DEPTH_TEST);
   glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
   glUseProgram(prog_hub_.id());

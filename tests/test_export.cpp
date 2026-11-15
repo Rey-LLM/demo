@@ -278,12 +278,16 @@ TEST_CASE("export: atomic write leaves no temporary file and replaces whole file
   CHECK_EQ(slurp(path), std::string("short\r\n"));
   CHECK(!fs::exists(path + ".tmp"));
   // A reader polling during rewrites only ever sees one complete version.
+  // (On Windows an open can fail while the file is being replaced; that is
+  // not a torn read, so a failed open is skipped.)
   std::atomic<bool> stop{false};
   std::atomic<int> bad{0};
   const std::string a(50000, 'a'), b(70000, 'b');
   std::thread reader([&] {
     while (!stop.load()) {
-      const std::string t = slurp(path);
+      std::ifstream f(path, std::ios::binary);
+      if (!f) continue;
+      const std::string t((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
       if (t != a && t != b && t != "short\r\n") bad.fetch_add(1);
     }
   });

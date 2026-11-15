@@ -46,7 +46,8 @@
   },
 
   "whale": {
-    "color": "#FFC23D",                     // "Neon Gold": the only emissive colour
+    "color": "#FF9A1F",                     // "Deep Amber": tier-1 whales; the emissive pass only
+    "color_hot": "#FFF1C9",                 // "White Gold": tier-3 whales and every arc head
     "intensity_min": 4.0,                   // HDR multiplier, tier 1 ...
     "intensity_max": 8.0,                   // ... tier 3
     "width_px": [2, 3, 4],                  // by tier

@@ -18,6 +18,7 @@
 //   gen_synthetic --rows 10000000 --out data.csv [--entities N] [--seed S]
 //                 [--format csv|ftxb] [--malformed-rate 0.0001] [--crlf]
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cmath>

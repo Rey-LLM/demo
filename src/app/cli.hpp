@@ -9,12 +9,14 @@
 namespace ftv {
 
 struct CliOptions {
-  std::string input;        // --input PATH (CSV or .ftxb)
+  std::string input;        // --input PATH (CSV or .ftxb); optional: without it only the globe and the live layer run
   InputFormat format = InputFormat::Auto;
-  std::string hubs_path;    // --hubs (default: config/hubs.json next to the binary)
-  std::string render_path;  // --render (default: config/render.json next to the binary)
-  std::string theme_path;   // --theme (default: config/theme.json next to the binary)
-  std::string shader_dir;   // --shaders (default: shaders/ next to the binary)
+  // Resources default to the copies compiled into the binary; these read from disk instead.
+  std::string data_dir;     // --data-dir DIR: read shaders/, config/ and assets/ from DIR
+  std::string hubs_path;    // --hubs (default: embedded config/hubs.json)
+  std::string render_path;  // --render (default: embedded config/render.json)
+  std::string theme_path;   // --theme (default: embedded config/theme.json)
+  std::string shader_dir;   // --shaders (default: embedded shaders/)
 
   unsigned threads = 0;          // --threads: total layout/merge concurrency (0 = auto)
   unsigned parser_threads = 0;   // --parser-threads (0 = max(1, hw - 2))
@@ -45,10 +47,11 @@ struct CliOptions {
   float cam_yaw_deg = 0.0f;       // --camera yaw,pitch,distance (degrees, degrees, world units)
   float cam_pitch_deg = -1000.0f; // < -900 => render.json default
   float cam_distance = 0.0f;      // 0 => render.json default
-  bool live = false;               // --live: start the feed adapters (config/feeds.json)
+  bool live = true;                // live feeds are the default; --replay or --no-live turn them off
+  bool live_explicit = false;      // --live was given
   bool replay = false;             // --replay [FILE.ftxcap]: play a capture (default: the bundled one)
   std::string replay_path;
-  std::string feeds_path;          // --feeds (default: config/feeds.json next to the binary)
+  std::string feeds_path;          // --feeds (default: embedded config/feeds.json)
   std::string export_dir;          // --export DIR: where exports are written (default: current directory)
   float export_after = -1.0f;      // --export-after S: export once after S seconds, then exit
   std::string pin_hub;             // --pin HUB_ID: start with that hub's panel pinned

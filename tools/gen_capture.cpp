@@ -13,9 +13,10 @@
 //               standing for 30 (label DELAYED, like the live adapter)
 //   COINBASE    BTC/ETH/SOL trades against USD, EUR and GBP, ~14/s
 //   KRAKEN      BTC/ETH/SOL trades against USD, EUR, GBP and JPY, ~8/s
+//   BINANCE     BTC/ETH/SOL trades against USDT and EUR, ~16/s
 // plus a handful of placed large trades so that every tier of whale occurs.
 // Prices: BTC 60,000, ETH 3,000, SOL 150 USD with a small random walk; EUR
-// 1.08, GBP 1.27, JPY 0.0067 USD (illustrative constants).
+// 1.08, GBP 1.27, JPY 0.0067, USDT 1.0 USD (illustrative constants).
 //
 // Usage: gen_capture --out assets/replay/default.ftxcap [--seed S] [--seconds N]
 //                    [--hubs config/hubs.json] [--feeds config/feeds.json]
@@ -74,7 +75,7 @@ struct Ctx {
   FeedsConfig feeds;
   std::vector<LiveEvent> out;
   std::int64_t t0 = 0;
-  double px[kAssetCount] = {60000.0, 3000.0, 150.0, 1.0, 1.08, 1.27, 0.0067, 0.138, 0.128};
+  double px[kAssetCount] = {60000.0, 3000.0, 150.0, 1.0, 1.08, 1.27, 0.0067, 0.138, 0.128, 1.0};
   std::uint64_t ids = 1;
 };
 
@@ -200,9 +201,10 @@ int main(int argc, char** argv) {
     Asset quotes[4];
     double quote_w[4];
   };
-  const Venue venues[2] = {
+  const Venue venues[3] = {
       {FeedId::Coinbase, 70.0, {Asset::USD, Asset::EUR, Asset::GBP, Asset::USD}, {0.72, 0.16, 0.12, 0.0}},
       {FeedId::Kraken, 125.0, {Asset::USD, Asset::EUR, Asset::GBP, Asset::JPY}, {0.55, 0.25, 0.12, 0.08}},
+      {FeedId::Binance, 60.0, {Asset::USDT, Asset::EUR, Asset::USDT, Asset::USDT}, {0.88, 0.12, 0.0, 0.0}},
   };
   for (const Venue& v : venues) {
     for (double t = rng.exponential(v.mean_gap_ms); t < static_cast<double>(D); t += rng.exponential(v.mean_gap_ms)) {
@@ -219,7 +221,7 @@ int main(int argc, char** argv) {
         }
         uq -= v.quote_w[q];
       }
-      if (base == Asset::SOL) quote = Asset::USD;
+      if (base == Asset::SOL) quote = v.feed == FeedId::Binance ? Asset::USDT : Asset::USD;
       trade(c, v.feed, base, quote, rng.uniform() < 0.5, rel, rng.lognormal(900.0, 1.9));
     }
   }
@@ -240,6 +242,8 @@ int main(int argc, char** argv) {
       {74000, FeedId::Kraken, Asset::BTC, Asset::GBP, true, 0.8e6},    // LONDON -> BTC, tier 2
       {90000, FeedId::Coinbase, Asset::SOL, Asset::USD, true, 0.6e6},  // NEW_YORK -> SOL, tier 1
       {103000, FeedId::Kraken, Asset::ETH, Asset::EUR, true, 3.0e6},   // FRANKFURT -> ETH, tier 3
+      {25000, FeedId::Binance, Asset::BTC, Asset::USDT, true, 1.4e6},  // NEW_YORK -> BTC, tier 2
+      {66000, FeedId::Binance, Asset::ETH, Asset::USDT, false, 2.9e6}, // ETH -> NEW_YORK, tier 3
   };
   for (const Placed& p : placed) {
     if (p.rel >= D) continue;

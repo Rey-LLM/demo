@@ -1,5 +1,6 @@
 #include "layout/initial_placement.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <numbers>
 

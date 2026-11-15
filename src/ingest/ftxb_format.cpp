@@ -1,5 +1,7 @@
 #include "ingest/ftxb_format.hpp"
 
+#include <cstring>
+
 namespace ftv {
 
 bool validate_ftxb_header(std::span<const char> file, FtxbHeader& out, std::string& error) {

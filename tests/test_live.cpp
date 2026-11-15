@@ -1,6 +1,7 @@
 // Live ingest: parser fixtures (one per message type), ring stress, reconnect
 // backoff bounds and the feed state machine on an injected clock.
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <fstream>
@@ -276,6 +277,96 @@ TEST_CASE("live: Kraken v2 trade, ticker, heartbeat and failed subscription") {
   }
 }
 
+TEST_CASE("live: Binance aggTrade (USDT and EUR), acknowledgement and error") {
+  Env e;
+  e.ctx.hubs.quote_hub[static_cast<std::size_t>(Asset::USDT)] = 0;  // USDT drawn to the USD home hub
+  e.ctx.hubs.quote_hub[static_cast<std::size_t>(Asset::EUR)] = 2;
+  {
+    Fixture f("binance_aggtrade.json");
+    REQUIRE(f.ok);
+    const ParseResult r = parse_binance(e.parser, f.buf.data(), f.len, e.ctx, e.batch, &e.prices);
+    CHECK(r.status == ParseStatus::Ok);
+    REQUIRE(e.batch.size() == 1);
+    const LiveEvent& ev = e.batch[0];
+    CHECK(ev.feed == FeedId::Binance);
+    CHECK(ev.kind == EventKind::Trade);
+    CHECK(ev.asset == Asset::BTC);
+    CHECK(near(ev.amount, 0.75));
+    CHECK(near(ev.usd_value, 0.75 * 60100.5));     // USDT at par: no USDT/USD tick yet
+    CHECK((ev.flags & kEvBuy) == 0);              // buyer was the maker: the taker sold
+    CHECK(ev.src_hub == 8 && ev.dst_hub == 0);    // BTC -> USD home hub
+    CHECK_EQ(ev.ts_ms, std::int64_t{1794717615000});
+    CHECK_EQ(ev.id_hash, 3141592653u);
+    CHECK(near(e.prices.usd(Asset::BTC), 60100.5));  // seeds an empty price book
+  }
+  {
+    // A USDT/USD tick (Kraken) re-values later USDT trades.
+    e.prices.set(Asset::USDT, 0.998, e.ctx.recv_ms);
+    Fixture f("binance_aggtrade.json");
+    e.batch.clear();
+    parse_binance(e.parser, f.buf.data(), f.len, e.ctx, e.batch, &e.prices);
+    REQUIRE(e.batch.size() == 1);
+    CHECK(near(e.batch[0].usd_value, 0.75 * 60100.5 * 0.998));
+  }
+  {
+    Fixture f("binance_aggtrade_eur.json");
+    REQUIRE(f.ok);
+    e.batch.clear();
+    parse_binance(e.parser, f.buf.data(), f.len, e.ctx, e.batch, &e.prices);
+    REQUIRE(e.batch.size() == 1);
+    CHECK(e.batch[0].asset == Asset::ETH);
+    CHECK((e.batch[0].flags & kEvBuy) != 0);
+    CHECK(e.batch[0].src_hub == 2 && e.batch[0].dst_hub == 7);  // EUR home hub -> ETH
+    CHECK(e.batch[0].usd_value == 0.0);                          // no EUR rate known yet
+    CHECK((e.batch[0].flags & kEvPriceUnknown) != 0);
+  }
+  {
+    Fixture f("binance_ack.json");
+    REQUIRE(f.ok);
+    e.batch.clear();
+    CHECK(parse_binance(e.parser, f.buf.data(), f.len, e.ctx, e.batch, &e.prices).status == ParseStatus::Ok);
+    CHECK(e.batch.size() == 0);
+  }
+  {
+    Fixture f("binance_error.json");
+    REQUIRE(f.ok);
+    CHECK(parse_binance(e.parser, f.buf.data(), f.len, e.ctx, e.batch, &e.prices).status == ParseStatus::Rejected);
+    const std::string m = R"({"code":-1003,"msg":"Too many requests"})";
+    FeedBuffer b(256);
+    const std::size_t n = b.assign(m);
+    CHECK(parse_binance(e.parser, b.data(), n, e.ctx, e.batch, &e.prices).status == ParseStatus::RateLimited);
+  }
+}
+
+TEST_CASE("live: ECB reference rates fill the FX board and only missing prices") {
+  Env e;
+  FxBoard board;
+  // GBP already has a fresh exchange-implied rate; the reference rate must not replace it.
+  e.prices.set(Asset::GBP, 1.30, e.ctx.recv_ms - 1000);
+  Fixture f("ecb_rates.json");
+  REQUIRE(f.ok);
+  const ParseResult r = parse_ecb_rates(e.parser, f.buf.data(), f.len, e.ctx, &e.prices, &board);
+  CHECK(r.status == ParseStatus::Ok);
+  CHECK_EQ(r.block_number, 20261113u);
+  CHECK_EQ(board.date(), 20261113u);
+  CHECK(near(board.usd(Asset::EUR), 1.25));
+  CHECK(near(board.usd(Asset::GBP), 1.0 / 0.75));
+  CHECK(near(board.usd(Asset::JPY), 1.0 / 150.0));
+  CHECK(near(e.prices.usd(Asset::EUR), 1.25));      // filled in
+  CHECK(near(e.prices.usd(Asset::CNY), 1.0 / 7.2));
+  CHECK(near(e.prices.usd(Asset::GBP), 1.30));      // exchange rate kept
+  Fixture g("ecb_error.json");
+  REQUIRE(g.ok);
+  CHECK(parse_ecb_rates(e.parser, g.buf.data(), g.len, e.ctx, &e.prices, &board).status == ParseStatus::Rejected);
+  Fixture m("malformed.json");
+  CHECK(parse_ecb_rates(e.parser, m.buf.data(), m.len, e.ctx, &e.prices, &board).status == ParseStatus::Malformed);
+  // A response in another base currency is not accepted.
+  const std::string eur = R"({"amount":1.0,"base":"EUR","date":"2026-11-13","rates":{"USD":1.25}})";
+  FeedBuffer b(256);
+  const std::size_t n = b.assign(eur);
+  CHECK(parse_ecb_rates(e.parser, b.data(), n, e.ctx, &e.prices, &board).status == ParseStatus::Malformed);
+}
+
 TEST_CASE("live: fiat quotes are valued through the implied cross rate only") {
   Env e;
   // BTC-GBP trade before any GBP rate is known: no USD value.
@@ -310,6 +401,7 @@ TEST_CASE("live: malformed and truncated input is rejected, never crashes") {
   CHECK(parse_sol_rpc(e.parser, f.buf.data(), f.len, e.ctx, e.batch).status == ParseStatus::Malformed);
   CHECK(parse_coinbase(e.parser, f.buf.data(), f.len, e.ctx, e.batch, &e.prices).status == ParseStatus::Malformed);
   CHECK(parse_kraken(e.parser, f.buf.data(), f.len, e.ctx, e.batch, &e.prices).status == ParseStatus::Malformed);
+  CHECK(parse_binance(e.parser, f.buf.data(), f.len, e.ctx, e.batch, &e.prices).status == ParseStatus::Malformed);
   // Every prefix of a valid message parses or fails cleanly.
   Fixture g("kraken_trade.json");
   REQUIRE(g.ok);
@@ -333,6 +425,12 @@ TEST_CASE("live: helpers") {
   CHECK(split_pair("BTC-USD", b, q) && b == Asset::BTC && q == Asset::USD);
   CHECK(split_pair("XBT/EUR", b, q) && b == Asset::BTC && q == Asset::EUR);
   CHECK(!split_pair("DOGEUSD", b, q));
+  CHECK(split_concat_pair("BTCUSDT", b, q) && b == Asset::BTC && q == Asset::USDT);
+  CHECK(split_concat_pair("solusdt", b, q) && b == Asset::SOL && q == Asset::USDT);
+  CHECK(split_concat_pair("ETHEUR", b, q) && b == Asset::ETH && q == Asset::EUR);
+  CHECK(split_concat_pair("BTCUSD", b, q) && b == Asset::BTC && q == Asset::USD);
+  CHECK(!split_concat_pair("DOGEUSDT", b, q));
+  CHECK(!split_concat_pair("USDT", b, q));
   net::Url u;
   CHECK(net::parse_url("wss://ws.kraken.com/v2", u) && u.host == "ws.kraken.com" && u.port == 443 && u.tls && u.path == "/v2");
   CHECK(net::parse_url("https://api.mainnet-beta.solana.com", u) && u.path == "/" && u.tls);

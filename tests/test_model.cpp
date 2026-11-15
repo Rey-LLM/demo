@@ -1,6 +1,7 @@
 // Live model: aggregation, labels, windows, snapshots, captures and seek
 // determinism; plus the pure interaction math (hub picking, view presets).
 
+#include <algorithm>
 #include <cmath>
 #include <string>
 #include <thread>
@@ -386,9 +387,10 @@ TEST_CASE("replay: the timeline loops, records start over, the model keeps accum
   const std::size_t oneLoop = m.whale_count();
   REQUIRE(oneLoop > 0);
   int whales = 0;
-  d.advance_to(m, 59999, [&](const WhaleRecord& w, double relS) {
+  d.advance_to(m, 59999, [&](const LiveEvent&, const WhaleRecord* w, double relS) {
+    if (!w) return;
     ++whales;
-    CHECK(w.label == SourceLabel::Replay);
+    CHECK(w->label == SourceLabel::Replay);
     CHECK(relS >= 20.0 && relS < 60.0);
   });
   CHECK_EQ(m.whale_count(), oneLoop * 3);
@@ -645,7 +647,7 @@ TEST_CASE("presets: 1-5 end exactly on their views after the 1.2 s eased flight"
   const auto tax = HubTaxonomy::load(kSrc + "/config/hubs.json", err);
   REQUIRE(tax.has_value());
   RenderSettings rs;
-  CHECK(kPresetFlightSeconds == 1.2f);
+  static_assert(kPresetFlightSeconds == 1.2f);
   const CameraPose globe = view_preset(1, *tax, rs);
   CHECK_EQ(globe.distance, rs.camera_start_distance);
   CHECK(std::fabs(globe.yaw - rs.camera_start_yaw_deg * kDegToRad) < 1e-6f);
@@ -724,4 +726,57 @@ TEST_CASE("presets: the flight is a monotone eased slerp along the great circle"
   // Half way in time is half way along the arc (the ease is symmetric).
   const CameraPose mid = ease_pose(a, b, 0.5f);
   CHECK(std::fabs(std::acos(glm::dot(da, dir(mid))) - total * 0.5f) < 1e-3f);
+}
+
+TEST_CASE("feeds: shipped configuration enables every public feed with TLS and the offline-only fallback") {
+  std::string err;
+  const auto tax = HubTaxonomy::load(kSrc + "/config/hubs.json", err);
+  REQUIRE(tax.has_value());
+  const auto feeds = load_feeds_config(kSrc + "/config/feeds.json", *tax, err);
+  REQUIRE(feeds.has_value());
+  CHECK(!feeds->fallback_per_feed);
+  for (FeedId f : {FeedId::BtcMempool, FeedId::BtcBlocks, FeedId::Eth, FeedId::Sol, FeedId::Coinbase, FeedId::Kraken,
+                   FeedId::Binance, FeedId::Fx}) {
+    const FeedConfig& c = feeds->feeds[static_cast<std::size_t>(f)];
+    CHECK(c.enabled);
+    CHECK(c.url.rfind(f == FeedId::Fx ? "https://" : "wss://", 0) == 0);
+  }
+  const FeedConfig& bn = feeds->feeds[static_cast<std::size_t>(FeedId::Binance)];
+  CHECK(bn.fallback_urls.size() >= 2);
+  CHECK(feeds->feeds[static_cast<std::size_t>(FeedId::Fx)].label == SourceLabel::Delayed);
+  CHECK(feeds->feeds[static_cast<std::size_t>(FeedId::Fx)].poll_s >= 60.0);
+  // USDT quotes go to the same hub as USD.
+  CHECK_EQ(feeds->quote_hub[static_cast<std::size_t>(Asset::USDT)], feeds->quote_hub[static_cast<std::size_t>(Asset::USD)]);
+}
+
+TEST_CASE("feeds: fallback policy and URL schemes are validated") {
+  std::string err;
+  const auto tax = HubTaxonomy::load(kSrc + "/config/hubs.json", err);
+  REQUIRE(tax.has_value());
+  const std::string head =
+      R"({"quote_hubs":{"USD":"NEW_YORK"},"chain_hubs":{"BTC":"BLOCKCHAIN_BTC","ETH":"BLOCKCHAIN_ETH","SOL":"BLOCKCHAIN_SOL"},)";
+  {
+    ftv::test::TempFile f("f1.json", head + R"("fallback_policy":"per_feed","feeds":[]})");
+    const auto c = load_feeds_config(f.path(), *tax, err);
+    REQUIRE(c.has_value());
+    CHECK(c->fallback_per_feed);
+  }
+  {
+    ftv::test::TempFile f("f2.json", head + R"("fallback_policy":"sometimes","feeds":[]})");
+    CHECK(!load_feeds_config(f.path(), *tax, err).has_value());
+  }
+  {
+    ftv::test::TempFile f("f3.json", head + R"("feeds":[{"id":"BINANCE","url":"wss://a.example/x","fallback_urls":["ws://b.example/x"]}]})");
+    CHECK(!load_feeds_config(f.path(), *tax, err).has_value());  // plain ws:// fallback refused
+  }
+  {
+    ftv::test::TempFile f("f4.json", head + R"("feeds":[{"id":"FX","url":"wss://a.example/x"}]})");
+    CHECK(!load_feeds_config(f.path(), *tax, err).has_value());  // FX is polled over https://
+  }
+  {
+    ftv::test::TempFile f("f5.json", head + R"("feeds":[{"id":"FX","label":"DELAYED","url":"https://a.example/x","poll_s":5}]})");
+    const auto c = load_feeds_config(f.path(), *tax, err);
+    REQUIRE(c.has_value());
+    CHECK(c->feeds[static_cast<std::size_t>(FeedId::Fx)].poll_s == 60.0);  // clamped
+  }
 }

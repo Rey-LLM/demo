@@ -1,0 +1,140 @@
+name: release
+
+# Every push to main builds a statically linked Windows x64 ftviz.exe (MSVC,
+# /MT, static OpenSSL from vcpkg), runs the unit tests, uploads the exe as a
+# workflow artifact and publishes it as a GitHub Release. A Linux job builds
+# with -Werror and runs the unit and offscreen render tests under Mesa.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Windows x64 (MSVC, static)
+    runs-on: windows-2022
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-bincache
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: glad generator dependency
+        run: python -m pip install --disable-pip-version-check jinja2
+
+      - name: Restore vcpkg binary cache
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: vcpkg-bincache
+          key: vcpkg-openssl-x64-windows-static-v1
+
+      - name: Static OpenSSL (vcpkg)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install openssl:x64-windows-static
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "OPENSSL_ROOT_DIR=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Save vcpkg binary cache
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg-bincache
+          key: vcpkg-openssl-x64-windows-static-v1
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          -DFTVIZ_STATIC=ON -DFTVIZ_WERROR=ON -DFTVIZ_BUILD_TOOLS=OFF
+          -DOPENSSL_ROOT_DIR="${{ env.OPENSSL_ROOT_DIR }}"
+          -DPython_EXECUTABLE="${{ env.pythonLocation }}\python.exe"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Check imports (system DLLs only)
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $dumpbin = Get-ChildItem -Recurse -Filter dumpbin.exe "$vs\VC\Tools\MSVC" | Where-Object { $_.FullName -match 'Hostx64\\x64' } | Select-Object -First 1
+          & $dumpbin.FullName /dependents build\Release\ftviz.exe
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item build\Release\ftviz.exe dist\ftviz.exe
+          Copy-Item README.md dist\README.md
+          Compress-Archive -Path dist\* -DestinationPath ftviz-windows-x64.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ftviz-windows-x64
+          path: |
+            dist/ftviz.exe
+            dist/README.md
+
+      - name: Publish release
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $sha = "${{ github.sha }}".Substring(0, 7)
+          $tag = "build-${{ github.run_number }}"
+          gh release create $tag dist/ftviz.exe ftviz-windows-x64.zip `
+            --target "${{ github.sha }}" `
+            --title "ftviz build ${{ github.run_number }} ($sha)" `
+            --notes "Automated Windows x64 build of $sha. Download ftviz.exe and double-click it; see README.md for details." `
+            --latest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  linux:
+    name: Linux x64 (GCC, -Werror, tests)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build libssl-dev \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl-dev libegl-dev \
+            mesa-utils libegl-mesa0 libgl1-mesa-dri xvfb python3-jinja2
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DFTVIZ_WERROR=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: xvfb-run -a ctest --test-dir build --output-on-failure
+
+      # Runs from an empty folder (embedded resources only) in the default
+      # live mode for about 25 s and prints the per-feed report, so the log
+      # shows which public feeds were reachable from the runner.
+      - name: Smoke test (no arguments, empty folder, live feeds)
+        run: |
+          mkdir smoke && cd smoke
+          timeout 180 xvfb-run -a -s "-screen 0 1280x720x24" ../build/ftviz --frames 450 --width 640 --height 360 2>&1 | grep -E '^\[(feed|replay|ingest)\]|error'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ftviz-linux-x64
+          path: build/ftviz

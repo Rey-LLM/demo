@@ -15,7 +15,8 @@ struct Theme {
   float background[3] = {0.0f, 0.0f, 0.0f};  // "Obsidian"   #050608
   float graticule[3] = {0.0f, 0.0f, 0.0f};   // "Amber Line" #C8962E
   float ink[3] = {0.0f, 0.0f, 0.0f};         // nodes, arcs, labels #D9DCE1
-  float whale[3] = {0.0f, 0.0f, 0.0f};       // "Neon Gold"  #FFC23D (emissive)
+  float whale[3] = {0.0f, 0.0f, 0.0f};       // "Deep Amber" #FF9A1F: tier-1 whale emissive
+  float whale_hot[3] = {0.0f, 0.0f, 0.0f};   // "White Gold" #FFF1C9: tier-3 whales and every arc head
   float graticule_alpha = 0.08f;             // 0.06 .. 0.10
   float graticule_spacing_deg = 15.0f;
   float node_alpha_min = 0.04f;

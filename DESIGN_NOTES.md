@@ -468,14 +468,16 @@ attachment. MSAA is 8× by default and is clamped, with a log line, to
 ### 6.3 Palette and passes
 
 All colours come from `config/theme.json` as sRGB hex values and are
-converted to linear RGB at load. There are four:
+converted to linear RGB at load. There are four, plus the hot end of the
+whale ramp:
 
 | Name | Value | Used for |
 |---|---|---|
 | Obsidian | `#050608` | Background. Flat, vignette ≤ 3%. |
 | Amber Line | `#C8962E` | Graticule, alpha 0.06–0.10. |
 | Ink | `#D9DCE1` | Nodes, arcs, hub markers, labels, globe limb; alpha 0.04–0.70. |
-| Neon Gold | `#FFC23D` | Whale arcs only, HDR intensity 4–8×. |
+| Deep Amber | `#FF9A1F` | Whale arcs and flow trails, HDR intensity 4–8× (trails 0.45× of tier 1). |
+| White Gold | `#FFF1C9` | Hot end of the whale ramp: tier 3 heads and cores run toward it. |
 
 The theme loader clamps every alpha and intensity to these ranges. Nothing
 is coloured per hub or per currency.
@@ -522,7 +524,23 @@ worker keeps the 16 largest single transactions of every currency
 total order (|amount|, then time, source, destination, channel), so the
 result does not depend on the thread count or the chunking. Rank 0–1 in a
 currency is tier 3 (4 px), rank 2–5 tier 2 (3 px), the rest tier 1 (2 px).
-Intensity grows with the tier from 4× to 8×.
+Intensity grows with the tier from 4× to 8×. The fragment shader mixes
+Deep Amber toward White Gold with a heat term (0 for trails, 0.5 for tier 2,
+1.0 for tier 3) that is strongest at the head and the ribbon core, so the
+largest transfers burn white-gold and the rest stay amber.
+
+**Flow trails (v3, tier 0).** Live and replayed trades or transactions of
+at least `trail_min_usd` (2,500 USD by default) between two different hubs
+become short amber trails in the same draw: no flash, 0.6× width, 0.45×
+the tier-1 intensity. A token bucket on the model thread (`trail_max_per_s`,
+40 by default, burst half a second) caps them, and when all 256 live slots
+are busy a whale evicts a trail but a trail never evicts a whale. They are
+not counted as whales anywhere (HUD, exports).
+
+**Hub glow (v3).** The hub pass writes a Gaussian halo (sigma 2.2 px × UI
+scale) into the emissive attachment, pulsing ±15 % at 1.7 rad/s, so hubs
+bloom softly. Glyphs write nothing there; the render tests confine
+emissive pixels to whales plus that radius around hubs.
 
 **Replay.** The dataset's time range is mapped onto `replay_seconds` of
 replay time (120 s by default) and looped. A whale's arc leaves its source
@@ -866,12 +884,21 @@ model thread applies that feed's records from the bundled capture, looped
 at 1×, with the label REPLAY, until a live message arrives. The adapter
 keeps trying to reconnect meanwhile.
 
+v3 adds `fallback_policy` to `feeds.json`. The shipped value
+`all_offline` replays a feed only while **no** feed is LIVE, i.e. when the
+machine is offline; one dead endpoint on an otherwise connected machine
+stays OFFLINE instead of blending synthetic data with real data.
+`per_feed` restores the v2 behaviour. Each feed can list `fallback_urls`;
+a failed connect (DNS, TCP or TLS) rotates to the next URL before the
+backoff delay. Measured in the cloud container, where every feed host is
+blocked: all feeds showed REPLAY after 15 s.
+
 ### 11.3 Labels
 
 | Label | Meaning | Where it comes from |
 |---|---|---|
-| LIVE | received from a public endpoint in this session | BTC, BTC_BLOCKS, ETH, COINBASE, KRAKEN |
-| DELAYED | real data fetched on purpose behind the chain tip | SOL (32 slots behind) |
+| LIVE | received from a public endpoint in this session | BTC, BTC_BLOCKS, ETH, COINBASE, KRAKEN, BINANCE |
+| DELAYED | real data fetched on purpose behind the chain tip, or published once a day | SOL (32 slots behind), FX (ECB reference rates) |
 | MODELED | derived from published aggregates, never observed | FIAT corridors |
 | REPLAY | played back from a capture file | `--replay`, or a feed in fallback |
 
@@ -892,6 +919,8 @@ that is what the table says; the adapter's own limit applies either way.
 | SOL | `wss://api.mainnet-beta.solana.com` `slotSubscribe`, then `getBlock` over HTTPS | 100 requests per 10 s per IP, 40 per 10 s for a single RPC, 40 concurrent connections, 100 MB per 30 s (solana.com/docs/references/clusters) | ≤ 3 `getBlock`/s (hard cap 5 in code), 32 slots behind the tip, at most 32 transfers sampled per block |
 | COINBASE | `wss://ws-feed.exchange.coinbase.com`, `matches`, `ticker`, `heartbeat` | none stated on the channels page | one connection, one subscribe |
 | KRAKEN | `wss://ws.kraken.com/v2`, `trade`, `ticker` | none stated on the trade channel page | one connection, two subscribes |
+| BINANCE | `wss://stream.binance.com:9443/stream?streams=<pair>@aggTrade/…`, fallbacks port 443 and `data-stream.binance.vision` | 5 incoming messages/s, 300 connections per 5 min per IP, 24 h connection lifetime (Binance WebSocket Streams docs) | one combined-stream connection, no messages sent. Binance answers HTTP 451 from US IP addresses; the feed then rotates to the fallback URLs (on the CI runner: two refusals, then LIVE) |
+| FX | `https://api.frankfurter.dev/v1/latest?base=USD&…`, fallback `api.frankfurter.app` | none stated; data changes once per working day | one GET every `poll_s` (900 s) |
 
 A Solana block is sampled: up to 32 of its transfers become events, each
 carrying its own USD value and the number of transactions it stands for.
@@ -903,7 +932,17 @@ the sampled transfers only. Nothing is extrapolated.
 Events are valued in USD with prices seen on the feeds themselves: the last
 Coinbase or Kraken ticker or trade for the asset. A trade quoted in EUR,
 GBP or JPY is valued through the cross rate implied by the same exchange's
-USD pair (`set_price` in `parsers.cpp`). No outside FX source is used. An
+USD pair (`set_price` in `parsers.cpp`). v3 adds the FX feed: the
+European Central Bank's daily reference rates via Frankfurter (labelled
+DELAYED, shown in the HUD with their date). They fill EUR, GBP and JPY
+prices only where no exchange has supplied one for 120 s, so exchange cross
+rates still win. USDT is valued at the Kraken USDT/USD price, or at par
+until that tick arrives.
+
+There is no real-time BIS feed: the BIS publishes survey data and
+statistical series, not a stream. The fiat corridors therefore stay
+MODELED (§11.6). No zero-auth ETF flow endpoint was found, so ETF data is
+not included. An
 event that arrives before any price is known has value 0 and cannot be a
 whale. A whale is a single event at or above the feed's `whale_usd`; tier 2
 is 3× and tier 3 is 10× that.
@@ -981,3 +1020,46 @@ the formats byte for byte.
 `ne_50m_coastline` layers of Natural Earth release v5.1.2, converted by
 `tools/build_coastlines.py`. Natural Earth is in the public domain
 (naturalearthdata.com).
+
+## 15. v3: one standalone binary
+
+**Embedded resources.** `cmake/embed_resources.cmake` turns every shader,
+the five config files, both coastline layers and the replay capture into
+`inline constexpr unsigned char` arrays (one generated header per file,
+regenerated only when the input changes) and an index
+(`src/core/embedded_fs.hpp`). `read_text_file` and `file_exists` accept
+`embedded:/<relative path>`. A path given on the command line or found
+under `--data-dir` wins; otherwise the embedded copy is used, so the binary
+needs no files next to it. The unit tests compare every embedded file to
+the source tree byte for byte.
+
+**Static linking.** `FTVIZ_STATIC` (default ON): MSVC builds with
+`/MT` (`CMAKE_MSVC_RUNTIME_LIBRARY`) and links vcpkg's
+`openssl:x64-windows-static`; MinGW links with `-static`; Linux links
+libstdc++ and libgcc statically and prefers `libssl.a`/`libcrypto.a`.
+GLFW, glad, GLM, simdjson and xxHash are always static. The Windows exe
+imports only system DLLs (KERNEL32, USER32, GDI32, SHELL32, ADVAPI32,
+CRYPT32, WS2_32 and the C runtime for MinGW). The Linux binary depends on
+libc and libm; libEGL, X11 and libGL are opened with `dlopen` at run time.
+
+**Windows specifics.** The exe uses the GUI subsystem, so a double-click
+opens no console; started from a console it attaches to it for log output,
+and a fatal error is shown in a message box. TLS peers are verified against
+the Windows ROOT certificate store (crypt32); elsewhere the usual CA bundle
+paths are probed. Winsock is initialised before the first socket (a v3 bug
+found under Wine: without it every feed failed at `getaddrinfo`).
+
+**Default live mode.** With no arguments ftviz shows the globe, the MODELED
+corridors and every feed. `--input` is optional; `--no-live` turns the
+feeds off.
+
+**HUD (v3).** The summary line shows LIVE x/y streams and total TX/s; each
+feed row adds a latency column (exponential moving average of local receive
+time minus the provider's event timestamp, so it includes clock skew); the
+FX row shows the ECB date and EURUSD; the whale tape lists the last eight
+whales, newest first.
+
+**What was not built as asked.** ImGui, GLEW and ixwebsocket are not used:
+the HUD is the existing instanced glyph renderer, glad replaces GLEW, and
+the existing RFC 6455 client in `net.cpp` handles WebSockets. Swapping them
+in would have replaced working, tested code with new dependencies.

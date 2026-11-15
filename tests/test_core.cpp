@@ -1,10 +1,14 @@
-// Core concurrency primitives and config parsing.
+// Core concurrency primitives, config parsing and the embedded resources.
 
 #include <atomic>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "core/embedded_fs.hpp"
+#include "core/file_util.hpp"
 #include "core/json.hpp"
 #include "core/mpmc_queue.hpp"
 #include "core/thread_pool.hpp"
@@ -161,4 +165,51 @@ TEST_CASE("model: default hub config layout matches the spec") {
   CHECK_EQ(tax->hub_for_location(pack_code8("ETH") | kChainDomainBit), *tax->find("BLOCKCHAIN_ETH"));
   CHECK_EQ(tax->hub_for_location(pack_code8("ZZ")), tax->fallback());
   CHECK_EQ(tax->hub_for_location(0), tax->fallback());
+}
+
+#ifndef FTVIZ_SOURCE_DIR
+#define FTVIZ_SOURCE_DIR "."
+#endif
+
+TEST_CASE("core: every runtime file is embedded byte for byte") {
+  const char* required[] = {"config/hubs.json",        "config/render.json",   "config/theme.json",
+                            "config/feeds.json",       "config/flows_baseline.csv", "assets/coastlines_110m.bin",
+                            "assets/coastlines_50m.bin", "assets/replay/default.ftxcap", "shaders/common.glsl",
+                            "shaders/whale.frag",      "shaders/globe.frag"};
+  for (const char* r : required) {
+    const EmbeddedFile* e = find_embedded(r);
+    REQUIRE(e != nullptr);
+    CHECK(e->size > 0);
+    CHECK(e->data[e->size] == 0);  // text can be used in place
+  }
+  std::size_t n = 0;
+  for (const EmbeddedFile& e : embedded_files()) {
+    std::ifstream f(std::string(FTVIZ_SOURCE_DIR) + "/" + std::string(e.path), std::ios::binary);
+    REQUIRE(f.good());
+    const std::string disk((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const auto mem = read_text_file(embedded_path(e.path));
+    REQUIRE(mem.has_value());
+    CHECK(*mem == disk);
+    ++n;
+  }
+  CHECK(n >= 30);
+}
+
+TEST_CASE("core: embedded paths normalise separators and reject unknown files") {
+  CHECK(is_embedded_path("embedded:/config/hubs.json"));
+  CHECK(!is_embedded_path("config/hubs.json"));
+  CHECK_EQ(embedded_path("/shaders/arc.vert"), std::string("embedded:/shaders/arc.vert"));
+  const EmbeddedFile* a = find_embedded("embedded:/shaders/arc.vert");
+  REQUIRE(a != nullptr);
+  CHECK(find_embedded("embedded:\\shaders\\arc.vert") == a);  // fs::path on Windows joins with '\\'
+  CHECK(find_embedded("embedded:/./shaders/arc.vert") == a);
+  CHECK(find_embedded("shaders/arc.vert") == a);
+  CHECK(find_embedded("embedded:/shaders/missing.vert") == nullptr);
+  CHECK(!read_text_file("embedded:/nope.json").has_value());
+  CHECK(file_exists("embedded:/config/feeds.json"));
+  CHECK(!file_exists("embedded:/config"));
+  std::string err;
+  const auto hubs = HubTaxonomy::load(embedded_path("config/hubs.json"), err);
+  REQUIRE(hubs.has_value());
+  CHECK(hubs->size() >= 10);
 }

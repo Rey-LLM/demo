@@ -73,7 +73,8 @@ inline constexpr std::uint32_t kLayerArcs = 8u;
 inline constexpr std::uint32_t kLayerWhales = 16u;
 inline constexpr std::uint32_t kLayerHubs = 32u;
 
-// One live whale arc slot (hub to hub, on the live clock).
+// One live arc slot (hub to hub, on the live clock): a whale (tier 1..3) or
+// a flow trail (tier 0: dim, thin, deep amber, no destination flash).
 struct LiveArcSlot {
   std::uint32_t src_hub = 0, dst_hub = 0, tier = 1, used = 0;
   float start = 0.0f, pad0 = 0.0f, pad1 = 0.0f, pad2 = 0.0f;
@@ -98,7 +99,7 @@ class Renderer {
  public:
   static constexpr unsigned kSlots = 3;
   static constexpr int kBloomLevels = 3;   // two mips tighter than v1: a sharper whale glow
-  static constexpr std::uint32_t kLiveArcSlots = 64;  // live whale arcs drawn concurrently
+  static constexpr std::uint32_t kLiveArcSlots = 256;  // live whale arcs and flow trails drawn concurrently
   static constexpr std::uint32_t kMaxVisibleEdges = 2000000;  // hard cap on drawn edges per frame
   // Most bytes of a layout snapshot copied into the position ring per frame,
   // so a 1M-node snapshot (12 MB) is spread over 3 frames.
@@ -168,6 +169,7 @@ class Renderer {
     glm::vec4 atmo;
     glm::vec4 atmo1;
     glm::uvec4 pick;
+    glm::vec4 gold_hot;
   };
 
   bool create_programs(std::string& error);

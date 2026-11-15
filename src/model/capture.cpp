@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iterator>
 
+#include "core/file_util.hpp"
 #include "model/feed_config.hpp"
 
 namespace ftv {
@@ -147,12 +148,12 @@ bool Capture::save(const std::string& path, std::string& error) const {
 }
 
 bool Capture::load(const std::string& path, const LiveModelConfig& modelCfg, std::string& error) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f) {
+  const auto file = read_text_file(path);  // a path on disk or an embedded resource
+  if (!file) {
     error = "cannot open " + path;
     return false;
   }
-  const std::vector<char> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  const std::vector<char> b(file->begin(), file->end());
   In in{b};
   char magic[4] = {};
   if (b.size() < 4 || (std::memcpy(magic, b.data(), 4), std::memcmp(magic, kMagic, 4) != 0)) {

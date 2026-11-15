@@ -48,6 +48,11 @@ struct FeedStatus {
   std::atomic<std::uint64_t> reconnects{0};
   std::atomic<std::int64_t> last_message_ms{-1};
   std::atomic<std::uint8_t> last_error{0};  // net::NetError of the last failure
+  // Source timestamp to receipt, smoothed (EMA over flow events that carry a
+  // source time; includes clock skew between the provider and this machine).
+  // -1 until the first such event.
+  std::atomic<std::int32_t> latency_ms{-1};
+  std::atomic<std::uint8_t> url_index{0};   // which of url / fallback_urls is in use
 };
 
 using TransitionRing = SpscRing<FeedTransition, 64>;
@@ -71,6 +76,7 @@ class LiveFeeds {
   [[nodiscard]] const FeedStatus& status(FeedId f) const noexcept { return status_[static_cast<std::size_t>(f)]; }
   [[nodiscard]] bool enabled(FeedId f) const noexcept { return cfg_.feeds[static_cast<std::size_t>(f)].enabled; }
   PriceBook& prices() noexcept { return prices_; }
+  [[nodiscard]] const FxBoard& fx() const noexcept { return fx_; }
   [[nodiscard]] const FeedsConfig& config() const noexcept { return cfg_; }
 
   // What one adapter thread works with (pointers into this object).
@@ -82,12 +88,15 @@ class LiveFeeds {
     MpscRing<LiveEvent>* ring = nullptr;
     TransitionRing* transitions = nullptr;
     FeedStatus* status = nullptr;
+    const std::array<FeedStatus, kFeedCount>* all_status = nullptr;  // fallback policy: is any feed LIVE?
+    FxBoard* fx = nullptr;
   };
 
  private:
   FeedsConfig cfg_;
   FeedHubs hubs_;
   PriceBook prices_;
+  FxBoard fx_;
   MpscRing<LiveEvent> ring_;
   std::array<TransitionRing, kFeedCount> transitions_{};
   std::array<FeedStatus, kFeedCount> status_{};
@@ -148,6 +157,8 @@ class ModelThread {
  private:
   void run(std::stop_token st);
   void push_visual(const WhaleRecord& w, float startS) noexcept;
+  // A flow trail for a non-whale hub-to-hub event (token bucket on the model clock).
+  void maybe_trail(const LiveEvent& e, std::int64_t clockMs, float startS) noexcept;
   void step_live(std::int64_t nowMs) noexcept;
   void step_replay(std::int64_t dtMs) noexcept;
 
@@ -177,6 +188,8 @@ class ModelThread {
   std::int64_t fb_last_ms_ = -1;
   std::array<bool, kFeedCount> replaying_{};
   AllocCounterFn alloc_fn_ = nullptr;
+  double trail_tokens_ = 0.0;
+  std::int64_t trail_last_ms_ = -1;
 };
 
 }  // namespace ftv

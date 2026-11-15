@@ -7,16 +7,23 @@
   //   bundled capture is shown as REPLAY instead, wherever it appears.
   // whale_usd: single events at or above this USD value become whale events
   //   (tier 2 at 3x, tier 3 at 10x).
-  "fallback_after_s": 15,        // OFFLINE or RATE_LIMITED this long -> REPLAY of the capture
+  "fallback_after_s": 15,        // OFFLINE or RATE_LIMITED this long -> REPLAY of the capture ...
+  "fallback_policy": "all_offline",  // ... but only while no feed is LIVE ("per_feed": each feed on its own)
   "stale_after_s": 30,           // LIVE but silent this long -> DEGRADED, then reconnect
   "max_frame_bytes": 8388608,    // 8 MB
+  // Flow trails: hub-to-hub trades and transfers worth at least this much
+  // are drawn as dim deep-amber arcs (at most trail_max_per_s new ones per
+  // second); whales (whale_usd per feed) burn brighter and hotter.
+  "trail_min_usd": 2500,
+  "trail_max_per_s": 40,
   "backoff_base_s": 0.5,
   "backoff_cap_s": 30,
   "replay_capture": "assets/replay/default.ftxcap",
 
   // Fiat quote currency -> hub that stands for its home market (a display
   // convention for exchange trades; documented in the README).
-  "quote_hubs": { "USD": "NEW_YORK", "EUR": "FRANKFURT", "GBP": "LONDON", "JPY": "TOKYO", "HKD": "HONG_KONG" },
+  // USDT (Binance quotes) tracks the US dollar, so it is drawn to New York too.
+  "quote_hubs": { "USD": "NEW_YORK", "USDT": "NEW_YORK", "EUR": "FRANKFURT", "GBP": "LONDON", "JPY": "TOKYO", "HKD": "HONG_KONG" },
   "chain_hubs": { "BTC": "BLOCKCHAIN_BTC", "ETH": "BLOCKCHAIN_ETH", "SOL": "BLOCKCHAIN_SOL" },
 
   "feeds": [
@@ -65,9 +72,32 @@
       "docs": "https://docs.kraken.com/api/docs/websocket-v2/trade",
       "subscribe": [
         "{\"method\":\"subscribe\",\"params\":{\"channel\":\"trade\",\"symbol\":[\"BTC/USD\",\"ETH/USD\",\"SOL/USD\",\"BTC/EUR\",\"ETH/EUR\",\"BTC/GBP\",\"BTC/JPY\"],\"snapshot\":false}}",
-        "{\"method\":\"subscribe\",\"params\":{\"channel\":\"ticker\",\"symbol\":[\"BTC/USD\",\"ETH/USD\",\"SOL/USD\",\"BTC/EUR\",\"ETH/EUR\",\"BTC/GBP\",\"BTC/JPY\"]}}"
+        "{\"method\":\"subscribe\",\"params\":{\"channel\":\"ticker\",\"symbol\":[\"BTC/USD\",\"ETH/USD\",\"SOL/USD\",\"BTC/EUR\",\"ETH/EUR\",\"BTC/GBP\",\"BTC/JPY\",\"USDT/USD\"]}}"
       ],
       "whale_usd": 250000
+    },
+    {
+      // Aggregate trades, combined stream: no subscribe message needed.
+      // stream.binance.com answers HTTP 451 in restricted regions (e.g. the
+      // US); data-stream.binance.vision is Binance's market-data-only host.
+      "id": "BINANCE", "enabled": true, "label": "LIVE",
+      "url": "wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade/ethusdt@aggTrade/solusdt@aggTrade/btceur@aggTrade/etheur@aggTrade",
+      "fallback_urls": [
+        "wss://stream.binance.com:443/stream?streams=btcusdt@aggTrade/ethusdt@aggTrade/solusdt@aggTrade/btceur@aggTrade/etheur@aggTrade",
+        "wss://data-stream.binance.vision/stream?streams=btcusdt@aggTrade/ethusdt@aggTrade/solusdt@aggTrade/btceur@aggTrade/etheur@aggTrade"
+      ],
+      "docs": "https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams",
+      "whale_usd": 250000
+    },
+    {
+      // ECB euro reference rates (published once per working day, ~16:00 CET)
+      // re-based to USD by Frankfurter. Prices only: no arcs come from this feed.
+      "id": "FX", "enabled": true, "label": "DELAYED",
+      "url": "https://api.frankfurter.dev/v1/latest?base=USD&symbols=EUR,GBP,JPY,CNY,HKD",
+      "fallback_urls": ["https://api.frankfurter.app/latest?from=USD&to=EUR,GBP,JPY,CNY,HKD"],
+      "docs": "https://frankfurter.dev",
+      "poll_s": 900,
+      "whale_usd": 0
     }
   ],
 

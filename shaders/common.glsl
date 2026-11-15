@@ -27,6 +27,7 @@ layout(std140, binding = 0) uniform Frame {
   vec4 u_atmo;       // rgb rim (amber), w alpha
   vec4 u_atmo1;      // x Fresnel exponent, y shell scale, z live clock (s), w unused
   uvec4 u_pick;      // x hovered hub + 1, y pinned hub + 1, z live arc slots, w layer mask
+  vec4 u_gold_hot;   // rgb whale emissive at tier 3 and at arc heads ("white gold"), w unused
 };
 
 // Layer bits in u_pick.w (FrameParams::layers).

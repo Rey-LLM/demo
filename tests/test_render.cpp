@@ -212,6 +212,40 @@ int main() {
       viewProj = p.proj * p.view;
       return true;
     };
+    // Hub markers glow (a small Gaussian core on the emissive attachment):
+    // is a pixel within that glow of a hub facing the camera?
+    auto near_hub = [&](const glm::vec2& px, const glm::mat4& vp) {
+      const float rr = sc.rs.globe.radius * (1.0f + sc.rs.globe.node_altitude);
+      const float tol = 4.0f * 2.2f * sc.rs.ui_scale + 3.0f;
+      for (const HubDef& d : sc.tax->hubs()) {
+        const glm::vec4 c = vp * glm::vec4(geo_normal(d.lat_deg, d.lon_deg) * rr, 1.0f);
+        if (c.w <= 1e-3f) continue;
+        const glm::vec2 q((c.x / c.w * 0.5f + 0.5f) * static_cast<float>(kWidth),
+                          (0.5f - c.y / c.w * 0.5f) * static_cast<float>(kHeight));
+        if (glm::length(px - q) <= tol) return true;
+      }
+      return false;
+    };
+    // Lit emissive pixels outside every hub glow.
+    auto emissive_outside_hubs = [&](const glm::mat4& vp, int* litNearHubs) {
+      std::vector<float> em;
+      int w = 0, h = 0;
+      if (!renderer.read_emissive(em, w, h)) return -1;
+      int stray = 0, nearHubs = 0;
+      for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+          const float* px = &em[(static_cast<std::size_t>(y) * static_cast<std::size_t>(w) + static_cast<std::size_t>(x)) * 4];
+          if (std::max({px[0], px[1], px[2]}) <= 1e-3f) continue;
+          if (near_hub(glm::vec2(static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f), vp)) {
+            ++nearHubs;
+          } else {
+            ++stray;
+          }
+        }
+      }
+      if (litNearHubs) *litNearHubs = nearHubs;
+      return stray;
+    };
 
     // ---- frame 1: whale preset, whales in flight -------------------------------
     {
@@ -312,7 +346,7 @@ int main() {
           if (std::max({px[0], px[1], px[2]}) <= 1e-3f) continue;
           ++lit;
           const glm::vec2 p(static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f);
-          bool ok = false;
+          bool ok = near_hub(p, vp);
           for (const glm::vec2& f : flashes) ok = ok || glm::length(p - f) <= flashTol;
           for (const auto& path : paths) {
             for (std::size_t k = 1; k < path.size() && !ok; ++k) ok = seg_dist(p, path[k - 1], path[k]) <= ribbonTol;
@@ -331,7 +365,7 @@ int main() {
 
     // ---- frame 2: a replay time with no whale in flight -> emissive is black ----
     {
-      std::fprintf(stderr, "[ RUN  ] render: emissive is empty when no whale is active\n");
+      std::fprintf(stderr, "[ RUN  ] render: emissive is only the hub glow when no whale is active\n");
       const int before = ftv::test::failure_count();
       // First replay time at which no event is in flight or flashing.
       const float life = th.whale_flight_s + th.whale_flash_s + 0.05f;
@@ -344,16 +378,14 @@ int main() {
       CHECK(quiet > 0.0f);
       glm::mat4 vp(1.0f);
       CHECK(render_at("globe", quiet, vp));
-      std::vector<float> em;
-      int w = 0, h = 0;
-      CHECK(renderer.read_emissive(em, w, h));
-      float peak = 0.0f;
-      for (float c : em) peak = std::max(peak, c);
-      std::fprintf(stderr, "  replay t=%.3f s, emissive peak %.5f, active whales %u\n", static_cast<double>(quiet),
-                   static_cast<double>(peak), renderer.counters().active_whales);
-      CHECK(peak <= 1e-3f);
+      int hubPx = 0;
+      const int stray = emissive_outside_hubs(vp, &hubPx);
+      std::fprintf(stderr, "  replay t=%.3f s, %d emissive px around hub markers, %d elsewhere, active whales %u\n",
+                   static_cast<double>(quiet), hubPx, stray, renderer.counters().active_whales);
+      CHECK(stray == 0);
+      CHECK(hubPx > 0);  // the hubs glow
       CHECK(renderer.counters().active_whales == 0);
-      std::fprintf(stderr, "[ %s ] render: emissive is empty when no whale is active\n",
+      std::fprintf(stderr, "[ %s ] render: emissive is only the hub glow when no whale is active\n",
                    ftv::test::failure_count() == before ? " OK " : "FAIL");
       ++ran;
     }
@@ -513,7 +545,7 @@ int main() {
           if (std::max({px[0], px[1], px[2]}) <= 1e-3f) continue;
           ++lit;
           const glm::vec2 p(static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f);
-          bool ok = false;
+          bool ok = near_hub(p, vp);
           for (std::size_t k = 1; k < path.size() && !ok; ++k) ok = seg_dist(p, path[k - 1], path[k]) <= tol;
           if (!ok) ++stray;
         }
@@ -524,7 +556,7 @@ int main() {
       // Slot cleared: nothing emissive, same number of draws.
       renderer.clear_live_arcs();
       CHECK(render_at("globe", quietT, vp));
-      CHECK(emissive_peak() <= 1e-3f);
+      CHECK(emissive_outside_hubs(vp, nullptr) == 0);
       CHECK(renderer.counters().active_whales == 0);
       CHECK(renderer.counters().draw_calls == draws);
       liveTime = 0.0f;

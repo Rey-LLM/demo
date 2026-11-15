@@ -4,17 +4,57 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <type_traits>
 
 #include "core/log.hpp"
 
 #if defined(FTVIZ_HAVE_EGL)
+// libEGL is loaded at run time (dlopen), so the binary does not depend on it:
+// a machine without EGL still runs ftviz and falls back to a hidden window.
+#define EGL_EGL_PROTOTYPES 0
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+#include <dlfcn.h>
 #endif
 
 namespace ftv {
 
 namespace {
+
+#if defined(FTVIZ_HAVE_EGL)
+struct EglApi {
+  PFNEGLGETPROCADDRESSPROC GetProcAddress = nullptr;
+  PFNEGLINITIALIZEPROC Initialize = nullptr;
+  PFNEGLTERMINATEPROC Terminate = nullptr;
+  PFNEGLBINDAPIPROC BindAPI = nullptr;
+  PFNEGLCHOOSECONFIGPROC ChooseConfig = nullptr;
+  PFNEGLCREATECONTEXTPROC CreateContext = nullptr;
+  PFNEGLDESTROYCONTEXTPROC DestroyContext = nullptr;
+  PFNEGLMAKECURRENTPROC MakeCurrent = nullptr;
+  bool ok = false;
+
+  EglApi() {
+    void* lib = dlopen("libEGL.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (!lib) lib = dlopen("libEGL.so", RTLD_NOW | RTLD_LOCAL);
+    if (!lib) return;
+    auto sym = [lib](auto& fn, const char* name) {
+      fn = reinterpret_cast<std::remove_reference_t<decltype(fn)>>(dlsym(lib, name));
+      return fn != nullptr;
+    };
+    ok = sym(GetProcAddress, "eglGetProcAddress") && sym(Initialize, "eglInitialize") &&
+         sym(Terminate, "eglTerminate") && sym(BindAPI, "eglBindAPI") && sym(ChooseConfig, "eglChooseConfig") &&
+         sym(CreateContext, "eglCreateContext") && sym(DestroyContext, "eglDestroyContext") &&
+         sym(MakeCurrent, "eglMakeCurrent");
+  }
+};
+
+const EglApi& egl() {
+  static const EglApi api;  // never unloaded: GL function pointers point into the driver
+  return api;
+}
+
+GLADapiproc egl_proc(const char* name) { return reinterpret_cast<GLADapiproc>(egl().GetProcAddress(name)); }
+#endif
 
 void glfw_error(int code, const char* desc) { FTV_LOG_ERROR("GLFW error %d: %s", code, desc); }
 
@@ -59,9 +99,9 @@ void GlWindow::destroy() noexcept {
 #if defined(FTVIZ_HAVE_EGL)
   if (egl_display_) {
     auto dpy = static_cast<EGLDisplay>(egl_display_);
-    eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-    if (egl_context_) eglDestroyContext(dpy, static_cast<EGLContext>(egl_context_));
-    eglTerminate(dpy);
+    egl().MakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    if (egl_context_) egl().DestroyContext(dpy, static_cast<EGLContext>(egl_context_));
+    egl().Terminate(dpy);
   }
 #endif
   egl_display_ = nullptr;
@@ -113,18 +153,19 @@ bool GlWindow::create(int width, int height, const char* title, bool vsync, bool
 
 bool GlWindow::create_offscreen(bool debugContext, std::string& error) {
 #if defined(FTVIZ_HAVE_EGL)
+  const EglApi& E = egl();
   auto getPlatformDisplay =
-      reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(eglGetProcAddress("eglGetPlatformDisplayEXT"));
+      E.ok ? reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(E.GetProcAddress("eglGetPlatformDisplayEXT")) : nullptr;
   EGLDisplay dpy = getPlatformDisplay ? getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr)
                                       : EGL_NO_DISPLAY;
   EGLint major = 0, minor = 0;
-  if (dpy != EGL_NO_DISPLAY && eglInitialize(dpy, &major, &minor)) {
+  if (dpy != EGL_NO_DISPLAY && E.Initialize(dpy, &major, &minor)) {
     egl_display_ = dpy;
-    if (eglBindAPI(EGL_OPENGL_API)) {
+    if (E.BindAPI(EGL_OPENGL_API)) {
       const EGLint cfgAttr[] = {EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT, EGL_NONE};
       EGLConfig cfg = nullptr;
       EGLint n = 0;
-      eglChooseConfig(dpy, cfgAttr, &cfg, 1, &n);
+      E.ChooseConfig(dpy, cfgAttr, &cfg, 1, &n);
       const int versions[][2] = {{4, 6}, {4, 5}, {4, 3}};
       for (const auto& v : versions) {
         const EGLint ctxAttr[] = {EGL_CONTEXT_MAJOR_VERSION,
@@ -136,15 +177,15 @@ bool GlWindow::create_offscreen(bool debugContext, std::string& error) {
                                   EGL_CONTEXT_OPENGL_DEBUG,
                                   debugContext ? EGL_TRUE : EGL_FALSE,
                                   EGL_NONE};
-        EGLContext ctx = eglCreateContext(dpy, n > 0 ? cfg : EGL_NO_CONFIG_KHR, EGL_NO_CONTEXT, ctxAttr);
+        EGLContext ctx = E.CreateContext(dpy, n > 0 ? cfg : EGL_NO_CONFIG_KHR, EGL_NO_CONTEXT, ctxAttr);
         if (ctx != EGL_NO_CONTEXT) {
           egl_context_ = ctx;
           break;
         }
       }
-      if (egl_context_ && eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, static_cast<EGLContext>(egl_context_))) {
+      if (egl_context_ && E.MakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, static_cast<EGLContext>(egl_context_))) {
         FTV_LOG_INFO("offscreen context: surfaceless EGL %d.%d", major, minor);
-        const bool ok = load_and_check(reinterpret_cast<GLADloadfunc>(eglGetProcAddress), debugContext, error);
+        const bool ok = load_and_check(egl_proc, debugContext, error);
         caps_.has_default_framebuffer = false;
         return ok;
       }
