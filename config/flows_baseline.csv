@@ -1,0 +1,22 @@
+# MODELED fiat corridors. Not observed data: every row below is derived from a
+# published aggregate, and everything the FlowModel produces from it carries
+# the MODELED label in the HUD, the exports and the README.
+#
+# Source: BIS Triennial Central Bank Survey 2022, "OTC foreign exchange
+# turnover in April 2022" (statistical release, 27 October 2022). Global OTC
+# FX turnover: USD 7.5 trillion per day ("net-net", all instruments). Share
+# of trades with the currency on one side: USD 88%, EUR 30.5%, JPY 17%,
+# GBP 13%, CNY 7%, HKD 2.6%. Retrieved 2026-11-15.
+#
+# Model: the US dollar is the vehicle currency (on one side of 88% of
+# trades), so each corridor is NEW_YORK <-> the currency's home hub, with
+# daily volume = share * 7.5e12 USD, split evenly between the two
+# directions, at a flat per-second rate (no intraday profile is assumed).
+# CHF and SGD have no share in the cited release and are not modeled.
+# No transaction counts are published; corridors carry volume only.
+currency,src_hub,dst_hub,share_pct,usd_per_day,source_url,as_of_date
+EUR,NEW_YORK,FRANKFURT,30.5,2287500000000,https://www.bis.org/publications/202210-commentary-otc-derivatives,2022-04-30
+JPY,NEW_YORK,TOKYO,17,1275000000000,https://www.bis.org/publications/202210-commentary-otc-derivatives,2022-04-30
+GBP,NEW_YORK,LONDON,13,975000000000,https://www.bis.org/publications/202210-commentary-otc-derivatives,2022-04-30
+CNY,NEW_YORK,HONG_KONG,7,525000000000,https://www.bis.org/publications/202210-commentary-otc-derivatives,2022-04-30
+HKD,NEW_YORK,HONG_KONG,2.6,195000000000,https://www.bis.org/publications/202210-commentary-otc-derivatives,2022-04-30

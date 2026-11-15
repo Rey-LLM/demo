@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ftviz VERSION 1.0.0 LANGUAGES C CXX)
+project(ftviz VERSION 2.0.0 LANGUAGES C CXX)
 
 # ----------------------------------------------------------------------------
 # Global settings
@@ -41,7 +41,32 @@ FetchContent_Declare(glm
   GIT_TAG        1.0.1
   GIT_SHALLOW    TRUE
   SOURCE_SUBDIR  ftviz_header_only)
-FetchContent_MakeAvailable(xxhash glm)
+# simdjson 3.10.1 (On-Demand API) for the live feed parsers. The amalgamated
+# singleheader/simdjson.cpp is compiled as its own library without our
+# warning flags; its headers are SYSTEM includes.
+FetchContent_Declare(simdjson
+  GIT_REPOSITORY https://github.com/simdjson/simdjson.git
+  GIT_TAG        v3.10.1
+  GIT_SHALLOW    TRUE
+  SOURCE_SUBDIR  ftviz_header_only)
+FetchContent_MakeAvailable(xxhash glm simdjson)
+
+add_library(ftviz_simdjson STATIC ${simdjson_SOURCE_DIR}/singleheader/simdjson.cpp)
+target_include_directories(ftviz_simdjson SYSTEM PUBLIC ${simdjson_SOURCE_DIR}/singleheader)
+target_compile_definitions(ftviz_simdjson PUBLIC SIMDJSON_EXCEPTIONS=0)
+set_target_properties(ftviz_simdjson PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# TLS for the live feeds (system OpenSSL >= 1.1.1; peer verification is always on).
+find_package(OpenSSL 1.1.1 REQUIRED)
+
+# Git revision recorded in export session.json.
+find_package(Git QUIET)
+set(FTVIZ_GIT_SHA "unknown")
+if(GIT_FOUND AND EXISTS ${PROJECT_SOURCE_DIR}/.git)
+  execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short=12 HEAD
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR} OUTPUT_VARIABLE FTVIZ_GIT_SHA
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+endif()
 
 add_library(ftviz_xxhash INTERFACE)
 target_include_directories(ftviz_xxhash SYSTEM INTERFACE ${xxhash_SOURCE_DIR})
@@ -167,7 +192,10 @@ add_library(ftviz_model STATIC
   src/model/edge_aggregation.cpp
   src/model/hub_taxonomy.cpp
   src/model/graph_builder.cpp
-  src/model/whales.cpp)
+  src/model/whales.cpp
+  src/model/live_model.cpp
+  src/model/feed_config.cpp
+  src/model/capture.cpp)
 ftviz_target_defaults(ftviz_model)
 target_link_libraries(ftviz_model PUBLIC ftviz_ingest ftviz_glm)
 
@@ -179,6 +207,23 @@ add_library(ftviz_layout STATIC
 ftviz_target_defaults(ftviz_layout)
 target_link_libraries(ftviz_layout PUBLIC ftviz_model)
 
+# Live feeds: parsers, network layer, feed state machines and adapter threads.
+add_library(ftviz_live STATIC
+  src/ingest/live/feed_state.cpp
+  src/ingest/live/parsers.cpp
+  src/ingest/live/net.cpp
+  src/ingest/live/adapters.cpp
+  src/ingest/live/live_runtime.cpp)
+ftviz_target_defaults(ftviz_live)
+target_link_libraries(ftviz_live PUBLIC ftviz_model PRIVATE ftviz_simdjson OpenSSL::SSL OpenSSL::Crypto)
+if(WIN32)
+  target_link_libraries(ftviz_live PRIVATE ws2_32)
+endif()
+
+add_library(ftviz_export STATIC src/export/exporter.cpp)
+ftviz_target_defaults(ftviz_export)
+target_link_libraries(ftviz_export PUBLIC ftviz_model)
+
 if(FTVIZ_BUILD_APP)
   add_library(ftviz_render STATIC
     src/render/gl_context.cpp
@@ -188,6 +233,7 @@ if(FTVIZ_BUILD_APP)
     src/render/hud.cpp
     src/render/gpu_timers.cpp
     src/render/picking.cpp
+    src/render/coastlines.cpp
     src/render/renderer.cpp)
   ftviz_target_defaults(ftviz_render)
   target_link_libraries(ftviz_render PUBLIC ftviz_layout $<IF:$<CONFIG:Debug>,ftviz_glad_debug,ftviz_glad> glfw)
@@ -205,27 +251,40 @@ if(FTVIZ_BUILD_APP)
     src/app/hud_stats.cpp
     src/app/application.cpp
     src/app/camera_presets.cpp
+    src/app/interaction.cpp
+    src/app/live_hud.cpp
+    src/app/live_session.cpp
     src/app/png_writer.cpp
     src/core/alloc_counter.cpp)
   ftviz_target_defaults(ftviz_app)
-  target_link_libraries(ftviz_app PUBLIC ftviz_render PRIVATE ftviz_stb)
+  target_link_libraries(ftviz_app PUBLIC ftviz_render ftviz_live ftviz_export PRIVATE ftviz_stb)
   target_compile_definitions(ftviz_app PRIVATE
     FTVIZ_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+    FTVIZ_VERSION="${PROJECT_VERSION}"
+    FTVIZ_GIT_SHA="${FTVIZ_GIT_SHA}"
     $<$<CONFIG:Debug>:FTVIZ_COUNT_ALLOCATIONS=1>)
 
   add_executable(ftviz src/app/main.cpp)
   ftviz_target_defaults(ftviz)
   target_link_libraries(ftviz PRIVATE ftviz_app)
-  # Ship shaders and config next to the binary so it runs from the build dir.
-  add_custom_command(TARGET ftviz POST_BUILD
+  # Ship shaders, config and assets next to the binary so it runs from the
+  # build dir. Runs on every build so an edited shader or asset is never stale.
+  add_custom_target(ftviz_runtime_files ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/shaders $<TARGET_FILE_DIR:ftviz>/shaders
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/config  $<TARGET_FILE_DIR:ftviz>/config)
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/config  $<TARGET_FILE_DIR:ftviz>/config
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/assets  $<TARGET_FILE_DIR:ftviz>/assets
+    VERBATIM)
+  add_dependencies(ftviz_runtime_files ftviz)
 endif()
 
 if(FTVIZ_BUILD_TOOLS)
   add_executable(gen_synthetic tools/gen_synthetic.cpp)
   ftviz_target_defaults(gen_synthetic)
   target_link_libraries(gen_synthetic PRIVATE ftviz_ingest)
+  # Generates the bundled SYNTHETIC replay capture (assets/replay/default.ftxcap).
+  add_executable(gen_capture tools/gen_capture.cpp)
+  ftviz_target_defaults(gen_capture)
+  target_link_libraries(gen_capture PRIVATE ftviz_model)
 endif()
 
 if(FTVIZ_BUILD_TESTS)
@@ -237,9 +296,14 @@ if(FTVIZ_BUILD_TESTS)
     tests/test_aggregation.cpp
     tests/test_octree.cpp
     tests/test_layout.cpp
-    tests/test_core.cpp)
+    tests/test_core.cpp
+    tests/test_live.cpp
+    tests/test_model.cpp
+    tests/test_export.cpp
+    src/app/interaction.cpp
+    src/render/camera.cpp)
   ftviz_target_defaults(ftviz_tests)
-  target_link_libraries(ftviz_tests PRIVATE ftviz_layout)
+  target_link_libraries(ftviz_tests PRIVATE ftviz_layout ftviz_live ftviz_export)
   target_compile_definitions(ftviz_tests PRIVATE FTVIZ_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
   add_test(NAME ftviz_tests COMMAND ftviz_tests)
 

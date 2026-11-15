@@ -105,6 +105,14 @@ constexpr std::array<std::array<std::uint8_t, kGlyphH>, 95> kFont5x7 = {{
 }};
 }  // namespace
 
+namespace {
+constexpr std::array<std::array<std::uint8_t, kGlyphH>, 3> kSymbols = {{
+    {{0x00, 0x0E, 0x1F, 0x1F, 0x1F, 0x0E, 0x00}},  // 128 filled dot
+    {{0x00, 0x0E, 0x11, 0x11, 0x11, 0x0E, 0x00}},  // 129 ring
+    {{0x00, 0x04, 0x02, 0x1F, 0x02, 0x04, 0x00}},  // 130 right arrow
+}};
+}  // namespace
+
 std::vector<std::uint8_t> build_font_atlas() {
   const int width = kGlyphCount * kCellW;
   std::vector<std::uint8_t> px(static_cast<std::size_t>(width * kCellH), 0);
@@ -112,8 +120,12 @@ std::vector<std::uint8_t> build_font_atlas() {
     for (int y = 0; y < kCellH; ++y) {
       for (int x = 0; x < kCellW; ++x) {
         std::uint8_t on = 0;
-        if (g == kGlyphCount - 1) {
+        if (g == 95) {
           on = 255;  // glyph 127: solid block used for HUD panels
+        } else if (g > 95) {
+          if (x < kGlyphW && y < kGlyphH) {
+            on = (kSymbols[static_cast<std::size_t>(g - 96)][static_cast<std::size_t>(y)] >> (kGlyphW - 1 - x)) & 1u ? 255 : 0;
+          }
         } else if (x < kGlyphW && y < kGlyphH) {
           on = (kFont5x7[static_cast<std::size_t>(g)][static_cast<std::size_t>(y)] >> (kGlyphW - 1 - x)) & 1u ? 255 : 0;
         }

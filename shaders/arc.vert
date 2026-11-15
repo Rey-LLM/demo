@@ -6,7 +6,8 @@
 //  * inter-hub edges: GL_LINE_STRIP, u_segments + 1 vertices per instance
 //    along the lifted great circle between the endpoints.
 // Endpoints are fetched by index from the node-position SSBO, so edges never
-// duplicate positions. Edges are sorted by weight within each range, so the
+// duplicate positions. Opacity is depth-faded (1.0 -> 0.35 across the scene
+// sphere) and vertices behind the globe are dropped by a ray-sphere test. Edges are sorted by weight within each range, so the
 // instance count selects the heaviest prefix (the edge budget).
 #include "common.glsl"
 
@@ -48,6 +49,11 @@ void main() {
     bool sel = ed.src + 1u == selected || ed.dst + 1u == selected;
     alpha = sel ? 0.60 : alpha * 0.35;
   }
+  // Depth cue and cheap analytic occlusion behind the globe (the depth
+  // buffer handles pixels, this removes the whole vertex so line strips fade
+  // out cleanly at the limb instead of ending in a stair-step).
+  alpha *= depth_fade(p);
+  if (occluded_by_globe(p)) alpha = 0.0;
   v_color = vec4(u_ink.rgb * alpha, alpha);  // premultiplied, additive
   gl_Position = u_view_proj * vec4(p, 1.0);
 }

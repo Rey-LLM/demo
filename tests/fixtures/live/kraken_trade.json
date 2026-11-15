@@ -1,0 +1,1 @@
+{"channel":"trade","type":"update","data":[{"symbol":"BTC/USD","side":"buy","price":60010.5,"qty":0.25,"ord_type":"market","trade_id":4665906,"timestamp":"2026-11-15T04:40:14.123456Z"},{"symbol":"ETH/USD","side":"sell","price":3001.0,"qty":2.0,"ord_type":"limit","trade_id":4665907,"timestamp":"2026-11-15T04:40:14.223456Z"}]}

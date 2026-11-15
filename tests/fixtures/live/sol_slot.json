@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"slotNotification","params":{"result":{"parent":301234566,"root":301234535,"slot":301234567},"subscription":0}}

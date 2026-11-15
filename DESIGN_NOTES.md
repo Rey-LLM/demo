@@ -33,7 +33,7 @@ deterministic option was taken. Those decisions are collected in
    interaction group. A dedicated coordinator thread runs it and publishes
    position snapshots through a lock-free triple buffer.
 4. **Render.** The main thread owns the GL context. It maps the layout onto
-   a globe and draws the scene with six instanced draws per frame (seven
+   a globe and draws the scene with eight draws per frame (nine
    with a pick), then an emissive bloom and composite chain. Data comes
    from immutable buffers plus persistently mapped rings guarded by fences.
 
@@ -190,9 +190,9 @@ The figures below assume 1M nodes and 7.76M edges.
 | Hub label glyphs | SSBO 9 | `{hub, code, column, side | length}`, 16 bytes per glyph | < 4 KB |
 | Whale events | SSBO 10 | `{src, dst, src hub, dst hub, start, tier}`, 32 bytes per event | < 16 KB |
 | Frame uniforms | UBO 0 | Persistent ring, 3 regions | 3 × 512 B |
-| Font | texture unit 1 | R8 atlas, 96 glyphs of 6×8 | small |
+| Font | texture unit 1 | R8 atlas, 99 glyphs of 6×8 | small |
 | Scene target | none | 2 × RGBA16F + `DEPTH_COMPONENT32F`, MSAA 8× | 332 MB at 1080p |
-| Resolve, bloom and output | none | 2 × RGBA16F, 9 bloom levels, SRGB8_ALPHA8 | ~50 MB at 1080p |
+| Resolve, bloom and output | none | 2 × RGBA16F, 3 bloom levels, SRGB8_ALPHA8 | not re-measured |
 | Pick target | none | R32UI + depth, plus a persistent PBO | ~16 MB at 1080p |
 
 Edge attributes are packed into 32 bits:
@@ -422,26 +422,38 @@ copy of the same formulas lives in `src/model/globe.hpp`, and
 
 ### 6.2 Frame structure and draw budget
 
-| Order | Pass | Call |
+| Order | Pass (timer) | Call |
 |---|---|---|
-| 1 | Globe: ray-cast sphere, graticule, limb, depth | `glDrawArrays(GL_TRIANGLES, 0, 3)` |
-| 2 | Nodes: 1–2.5 px discs | `glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, N)` |
-| 3 | Intra-hub arcs | `glDrawArraysInstanced(LINES, 0, 2, intra)` |
-| 4 | Inter-hub arcs, 32 segments each | `glDrawArraysInstanced(LINE_STRIP, 0, 33, inter)` |
-| 5 | Whale arcs and flashes (emissive attachment only) | `glDrawArraysInstanced(TRIANGLE_STRIP, 0, 66, 2W)` |
-| 6 | Hub markers and labels | `glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, H + glyphs)` |
-| on click | Picking (R32UI) | `glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, N)` |
-| post | MSAA resolve | 2 × `glBlitNamedFramebuffer` |
-| post | Bloom: 5 downsamples, 4 upsamples | 9 × `glDrawArrays(GL_TRIANGLES, 0, 3)` |
-| post | Composite, then present | 2 × `glDrawArrays(GL_TRIANGLES, 0, 3)` |
-| post | HUD | `glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, glyphs)` |
+| 1 | Globe: ray-cast sphere, graticule, limb, depth (GLOBE) | `glDrawArrays(GL_TRIANGLES, 0, 3)` |
+| 2 | Atmosphere: Fresnel rim on a shell at 1.015 R (ATMO) | `glDrawArrays(GL_TRIANGLES, 0, 3)` |
+| 3 | Coastlines: one instance per segment, 1 px analytic AA (COAST) | `glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, segments)` |
+| 4 | Nodes: 1–2.5 px discs (NODES) | `glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, N)` |
+| 5 | Intra-hub arcs (ARCS) | `glDrawArraysInstanced(LINES, 0, 2, intra)` |
+| 6 | Inter-hub arcs, 32 segments each (ARCS) | `glDrawArraysInstanced(LINE_STRIP, 0, 33, inter)` |
+| 7 | Whale arcs, heads and flashes, emissive attachment only (WHALES) | `glDrawArraysInstanced(TRIANGLE_STRIP, 0, 66, instances)` |
+| 8 | Hub markers and labels (HUBS) | `glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, H + glyphs)` |
+| on click | Node picking, R32UI (PICK) | `glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, N)` |
+| post | MSAA resolve (POST) | 2 × `glBlitNamedFramebuffer` |
+| post | Bloom: 3 downsamples, 2 upsamples (POST) | 5 × `glDrawArrays(GL_TRIANGLES, 0, 3)` |
+| post | Composite, then present (POST) | 2 × `glDrawArrays(GL_TRIANGLES, 0, 3)` |
+| post | HUD, including the live layer (HUD) | `glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, glyphs)` |
 
-The scene makes 6 draws every frame, or 7 with a pick pending. The post
-chain makes 12 with the HUD on. The counts do not depend on the graph, the
-camera or the replay clock: a pass with nothing to show still issues its
-draw with zero instances or with every primitive collapsed off-screen.
-There is no `glDrawElements*`, no indirect draw and no compatibility
-profile.
+The scene makes 8 draws every frame, or 9 with a pick pending. The post
+chain makes 8 with the HUD on. The counts do not depend on the graph, the
+camera, the feeds or the replay clock: a pass with nothing to show still
+issues its draw with zero instances, with alpha 0, or with every primitive
+collapsed off-screen. Every pass has a `GL_TIME_ELAPSED` query; the names
+in brackets are the columns of the `--frames` report. There is no
+`glDrawElements*`, no indirect draw and no compatibility profile.
+
+**v2 passes.** Coastlines are Natural Earth polylines (§14) uploaded once:
+the 1:110m set above a camera altitude of 1,400 units, the 1:50m set below
+it. Their colour is amber mixed 45% toward graphite at alpha 0.22. The
+atmosphere is `pow(1 − N·V, 5)` in amber at alpha 0.20 and writes to the
+scene attachment only, so it never blooms. Arcs fade with view depth and
+are discarded where the globe's analytic sphere occludes them. A whale has
+a bright head and a tapering trail. Hub hover and pin use a CPU ray against
+the sphere (§13), so they add no draw.
 
 **Render targets.** The scene renders into an MSAA framebuffer with two
 RGBA16F colour attachments (scene and emissive) and a 32F depth buffer.
@@ -656,7 +668,8 @@ arc toggles, hub fly-to) and a drag:
 
 - 0 allocations in our frame code;
 - 65,682 driver allocations inside GL calls, reported and not asserted;
-- 18 draws per frame throughout (6 scene, 12 post).
+- 16 draws per frame throughout (8 scene, 8 post) in v2; the model thread
+  reported 0 allocations while ticking in the same run.
 
 ## 8. Ingest details
 
@@ -759,10 +772,30 @@ After 20 iterations, 100% of nodes are within 1.2 R of their hub anchor.
 2.04 ms (max 2.39 ms, 19 frames); amortised to ≤ 4 MiB per frame it took a
 mean of 0.70 ms (max 0.91 ms).
 
-**Rendering** was not measured on a GPU. The machine above has none, and
-frame times from a software rasteriser say nothing about one. What was
-verified is structural: the draw counts in §6.2 and the zero-allocation
-check in §7.
+**Rendering: not yet measured on discrete GPU.** The machine above has
+none. The figures below are from Mesa llvmpipe (LLVM 20.1.2, software
+rasteriser, 4 vCPUs), Release, 2560×1440, 4× MSAA (the driver's maximum),
+300,000-row dataset (29,922 nodes, 4,000 inter-hub arcs drawn), on
+2026-11-15. They compare v1 and v2 on the same software rasteriser and say
+nothing about a GPU.
+
+| | v1 (110 frames) | v2 (50 frames) |
+|---|---|---|
+| Frame ms mean / p50 / p95 | 331.2 / 312.5 / 423.2 | 404.9 / 402.1 / 477.7 |
+| Draws per frame | 18 (6 scene, 12 post) | 16 (8 scene, 8 post) |
+| GLOBE | 0.163 | 1.412 |
+| ATMO | n/a | 1.715 |
+| COAST | n/a | 0.855 |
+| NODES | 0.119 | 0.855 |
+| ARCS | 24.560 | 40.165 |
+| WHALES | 0.211 | 0.523 |
+| HUBS | 0.210 | 0.459 |
+| POST | 95.621 | 128.002 |
+| HUD | 0.109 | 0.910 |
+
+Pass columns are `GL_TIME_ELAPSED` means in ms as llvmpipe reports them.
+The v2 frame is slower on this rasteriser; the two runs were single runs
+on a shared VM and were not repeated.
 
 **Builds**: GCC 13 Release and Debug with `-DFTVIZ_WERROR=ON` and
 `-Wall -Wextra -Wpedantic -Wshadow -Wconversion`, zero warnings. All tests
@@ -775,7 +808,7 @@ pass and every build gives the same layout checksum.
 | ≥ 1.5M rows/s at 10M rows on 8 cores | **Met on fewer cores.** 3.37M rows/s in the parse phase and 2.55M rows/s end to end, with 2 parser threads on 4 vCPUs. |
 | Octree vs brute force < 2% | **Met.** 0.70% at θ = 0.8. |
 | Layout checksum determinism | **Met** across runs, thread counts, compilers and build types. |
-| Scene draws constant per frame | **Met.** 6 scene draws, or 7 with a pick; 12 post draws with the HUD. |
+| Scene draws constant per frame | **Met.** 8 scene draws, or 9 with a pick; 8 post draws with the HUD. |
 | ≤ 2M visible edges by priority | **Met.** Enforced by the budget caps. |
 | Zero allocations per frame | **Met** in our code (Debug assertion, §7). |
 | Zero warnings | **Met** with GCC. MSVC `/W4` was **not built**. |
@@ -798,3 +831,153 @@ These are not implemented. They are listed so the trade-offs are explicit.
    vendors, so it would only be acceptable with a determinism mode switch.
 4. **Fused passes.** Fuse the inverse permutation into the repulsion write
    and stream the spring pass. Together they are worth about 15 ms here.
+
+## 11. Live data
+
+### 11.1 Threads and queues
+
+```
+feed thread ×6 --LiveEvent (64 B)--> MPSC ring (65,536) --> model thread
+feed thread ×6 --FeedTransition----> SPSC ring per feed --> model thread
+model thread   --VisualEvent-------> SPSC ring (1,024)  --> render thread
+model thread   --LiveSnapshot------> double buffer      --> HUD, exporter
+```
+
+No queue blocks its producer. A full ring drops the item and counts it;
+the count is on the feed's HUD row and in `session.json`. The model thread
+ticks every 10 ms, applies at most 32,768 events per tick and publishes a
+snapshot at 50 Hz. It allocates nothing while ticking (asserted in Debug
+with the counting allocator, as in §7). Feed threads allocate only when a
+connection opens.
+
+The network client is in `src/ingest/live/net.cpp`: TLS through OpenSSL
+with certificate and host name verification always on, HTTP/1.1 upgrade,
+RFC 6455 framing with masking, ping/pong and an 8 MB frame limit. It
+honours `HTTPS_PROXY` with a CONNECT tunnel.
+
+### 11.2 Feed state machine
+
+`CONNECTING → LIVE` on the first valid message. `LIVE → DEGRADED` after
+30 s of silence, then a reconnect. Any failure gives `OFFLINE`; HTTP 429 or
+a provider rate-limit error gives `RATE_LIMITED`. Reconnects use full
+jitter: a uniform delay in `[0, min(30 s, 0.5 s · 2^attempt)]`. A feed that
+has been `OFFLINE` or `RATE_LIMITED` for 15 s switches to `REPLAY`: the
+model thread applies that feed's records from the bundled capture, looped
+at 1×, with the label REPLAY, until a live message arrives. The adapter
+keeps trying to reconnect meanwhile.
+
+### 11.3 Labels
+
+| Label | Meaning | Where it comes from |
+|---|---|---|
+| LIVE | received from a public endpoint in this session | BTC, BTC_BLOCKS, ETH, COINBASE, KRAKEN |
+| DELAYED | real data fetched on purpose behind the chain tip | SOL (32 slots behind) |
+| MODELED | derived from published aggregates, never observed | FIAT corridors |
+| REPLAY | played back from a capture file | `--replay`, or a feed in fallback |
+
+The label travels with every event into the flow cells, the whale journal
+and the volume journal, so each export row and each HUD row carries it. A
+hub panel lists every label that contributed to the hub.
+
+### 11.4 Endpoints and rate limits
+
+Documentation pages were read on 2026-11-15. Where a page states no limit,
+that is what the table says; the adapter's own limit applies either way.
+
+| Feed | Endpoint | Published limit | Adapter behaviour |
+|---|---|---|---|
+| BTC | `wss://ws.blockchain.info/inv`, `unconfirmed_sub` | none found on the provider's API page | one connection, no requests after the subscribe |
+| BTC_BLOCKS | `wss://mempool.space/api/v1/ws`, `want: blocks` | "usage limits apply to our WebSocket API", no figures (mempool.space/docs/api/websocket) | one connection, one subscribe |
+| ETH | `wss://ethereum-rpc.publicnode.com`, `newHeads`, then `eth_getBlockByNumber` | not checked: the provider's page was not read | one connection, ≤ 2 requests/s |
+| SOL | `wss://api.mainnet-beta.solana.com` `slotSubscribe`, then `getBlock` over HTTPS | 100 requests per 10 s per IP, 40 per 10 s for a single RPC, 40 concurrent connections, 100 MB per 30 s (solana.com/docs/references/clusters) | ≤ 3 `getBlock`/s (hard cap 5 in code), 32 slots behind the tip, at most 32 transfers sampled per block |
+| COINBASE | `wss://ws-feed.exchange.coinbase.com`, `matches`, `ticker`, `heartbeat` | none stated on the channels page | one connection, one subscribe |
+| KRAKEN | `wss://ws.kraken.com/v2`, `trade`, `ticker` | none stated on the trade channel page | one connection, two subscribes |
+
+A Solana block is sampled: up to 32 of its transfers become events, each
+carrying its own USD value and the number of transactions it stands for.
+Transaction counts therefore cover the whole block and USD volume covers
+the sampled transfers only. Nothing is extrapolated.
+
+### 11.5 Valuation
+
+Events are valued in USD with prices seen on the feeds themselves: the last
+Coinbase or Kraken ticker or trade for the asset. A trade quoted in EUR,
+GBP or JPY is valued through the cross rate implied by the same exchange's
+USD pair (`set_price` in `parsers.cpp`). No outside FX source is used. An
+event that arrives before any price is known has value 0 and cannot be a
+whale. A whale is a single event at or above the feed's `whale_usd`; tier 2
+is 3× and tier 3 is 10× that.
+
+### 11.6 Modeled fiat corridors
+
+`config/flows_baseline.csv` holds five corridors derived from the BIS
+Triennial Central Bank Survey 2022 (global OTC FX turnover of USD 7.5
+trillion per day and each currency's share of trades; the file cites the
+page). Each corridor is New York ↔ the currency's home hub at a flat
+per-second rate. They carry volume and no transaction count, because none
+is published. CHF and SGD have no share in the cited text and are not
+modeled.
+
+### 11.7 Capture and replay
+
+A `.ftxcap` file is a header (flags, configuration hash, start time,
+duration), the 64-byte events, and a keyframe of the model state every
+10 s, zero-run encoded. A seek restores the nearest keyframe at or before
+the target and replays forward, so the result is identical to playing from
+the start (tested by hashing the state). The bundled
+`assets/replay/default.ftxcap` is **synthetic**: `tools/gen_capture.cpp`
+generates it from seed 20261115 (120 s, 14,380 records). It is flagged
+SYNTHETIC in the file, on the timeline and in `session.json`. No capture of
+real feed traffic is bundled, because the build machine could not reach the
+endpoints.
+
+## 12. Export
+
+`E`, the EXPORT button or `--export-after` asks the exporter thread for one
+export. The request is coalesced: asking again while one is running does
+nothing. The thread takes the latest model snapshot, reads the journals
+under the journal gate (a Dekker-style flag pair with the model thread, so
+neither side blocks on a lock) and writes five files into a new directory
+`ftviz_export_<UTC timestamp>`:
+
+| File | Content |
+|---|---|
+| `session.json` | version, git SHA, start and end time, mode, capture, label definitions, per-feed state history and counters, modeled corridors with source |
+| `hub_flows.csv` | `src_hub,dst_hub,currency,usd_volume,tx_count,source_label` |
+| `hub_flows.json` | the same flows nested by source and destination hub |
+| `whales.csv` | `ts_utc,chain,asset,usd_value,tier,src,dst,source_label` |
+| `volume_tps.csv` | `ts_utc,feed,tx_count,usd_volume`, one row per second and feed |
+
+Each file is written to `<name>.tmp`, flushed, and renamed. Times are ISO
+8601 UTC. CSV fields follow RFC 4180 quoting. The render thread only shows
+the result as a toast for 3 s. Golden files in `tests/golden/export/` pin
+the formats byte for byte.
+
+## 13. Interaction
+
+- **Hub picking.** A ray through the cursor is intersected with the globe
+  sphere on the CPU and the nearest hub within 1.6° wins. Hover highlights
+  it; a click pins its panel (1 min, 15 min and session inflow, outflow and
+  net, tx/s, whale count, top three counterparties, contributing labels).
+- **View presets.** Keys 1–5 fly to the globe, the Americas, Europe, Asia
+  and the chain shell. The flight lasts 1.2 s: the direction is slerped and
+  distance interpolated with a cubic ease in and out, and the endpoints are
+  exact.
+- **Pause.** Space stops the layout, the model clock and the replay clock.
+  Feeds keep filling the bounded ring and count drops once it is full.
+- **Timeline.** In `--replay` the 1 px amber line is the capture. Left and
+  Right seek 1 s, with Shift 10 s; dragging scrubs. A seek clears the live
+  whale arcs.
+
+## 14. Dependencies and data added in v2
+
+| Dependency | Pin | Why |
+|---|---|---|
+| simdjson | tag `v3.10.1` (FetchContent, single-header build, exceptions off) | Feed messages are JSON at up to thousands per second. The On-Demand parser reads them without building a tree and without allocating per message, which the zero-allocation rule for the feed hot path needs. |
+| OpenSSL | system package, ≥ 1.1.1 (`find_package`) | Every endpoint is `wss://` or `https://`. TLS is not something to hand-write, and the system library gets security updates from the OS. It is the only dependency not pinned to a tag, for that reason. |
+
+**Natural Earth.** `assets/coastlines_110m.bin` and
+`assets/coastlines_50m.bin` are the `ne_110m_coastline` and
+`ne_50m_coastline` layers of Natural Earth release v5.1.2, converted by
+`tools/build_coastlines.py`. Natural Earth is in the public domain
+(naturalearthdata.com).

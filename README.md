@@ -1,77 +1,52 @@
 # ftviz
 
-A C++20 / OpenGL 4.5 renderer for large financial transaction graphs: ten
-million transactions, one million entities, drawn as hairline flows across a
-dark globe with the largest transfers in gold.
+A C++20 / OpenGL 4.5 visualizer for financial flows on a dark globe:
+transaction graphs from a file, public crypto feeds live, modeled fiat
+corridors, and the largest transfers in gold.
 
-![The globe at 3840×2160: fiat hubs at their cities, chain hubs in open ocean, inter-hub flows as great-circle hairlines, whale transfers in gold](docs/screenshots/hero_globe.png)
+![The globe with coastlines, hub flows as great-circle hairlines, whale transfers in gold, feed rows top left and the replay timeline at the bottom](docs/screenshots/hero_globe.png)
 
 ## Features
 
-- **Ingest at memory speed.** A memory-mapped CSV or packed `.ftxb` file is
-  parsed by parallel workers with no per-row allocation: 3.37M rows/s on a
-  4-vCPU VM (see [Performance](#performance)).
-- **Deterministic layout.** A parallel Barnes-Hut force solver with SIMD
-  kernels arranges every entity around its hub and gives a bit-identical
-  result for any thread count.
-- **Geographic globe.** Fiat centres sit at their cities' coordinates, chain
-  networks at fixed points in open ocean. Flows between hubs are lifted
-  great-circle arcs.
-- **Four colours.** Obsidian background, amber 15° graticule, ink for nodes,
-  arcs and labels, and gold reserved for whale transfers. Nothing is
-  coloured per hub or per currency.
-- **Whale replay.** The 16 largest transactions of each currency travel
-  their arcs on a looping replay timeline, written to an emissive buffer and
-  bloomed on their own.
-- **Constant draw sequence.** Six instanced scene draws and a fixed
-  fullscreen post chain per frame, whatever the graph size. No
-  `glDrawElements`, no per-frame buffer re-specification, zero heap
-  allocations on the render thread (asserted in Debug builds).
-- **Offscreen screenshots.** `--screenshot` renders a frame without a
-  window and writes a PNG; the same command gives the same pixels.
+- **Globe.** Natural Earth coastlines, a 15° graticule and a thin amber
+  rim. Arcs fade with depth and are hidden behind the globe.
+- **Four colours.** Obsidian `#050608`, amber `#C8962E`, ink `#D9DCE1`, and
+  neon gold `#FFC23D` for whales only. Only whales glow.
+- **Live feeds.** Bitcoin, Ethereum, Solana, Coinbase and Kraken over
+  public WebSocket endpoints, each with a state, a rate and a drop count
+  on screen.
+- **Honest labels.** Every source is LIVE, DELAYED, MODELED or REPLAY
+  wherever it appears: HUD, hub panel, exports.
+- **Replay.** A capture plays on a seekable timeline. A feed that is down
+  for 15 s falls back to it and says so.
+- **Export.** One key writes the session to five CSV and JSON files.
+- **Interaction.** Hover and pin hubs, five camera presets, pause, scrub.
+- **Fixed frame.** 8 scene draws and 8 post draws per frame whatever the
+  data; no `glDrawElements`; zero heap allocations per frame on the
+  render, model and layout threads (asserted in Debug builds).
+- **Deterministic screenshots.** `--screenshot` renders offscreen; the
+  same command gives the same bytes.
 
 ## Gallery
 
-All four images are engine frames at 3840×2160, rendered with the commands
-under [Screenshots](#screenshots).
+Engine frames at 3840×2160, from the commands under
+[Screenshots](#screenshots). The capture they replay is synthetic.
 
 | | |
 |---|---|
-| ![Close-up of the London hub: thousands of nodes on the hub's disc, chords between them, arcs leaving toward Frankfurt and Zurich](docs/screenshots/hub_closeup_london.png) | ![Whale transfers in gold travelling their arcs between hubs, each with a short trail](docs/screenshots/whale_event.png) |
-| London close-up (`--camera london`) | Whale transfers in flight (`--camera whale`) |
-| ![The amber graticule converging on the South Pole, with arcs passing over the limb](docs/screenshots/graticule_detail.png) | |
-| Graticule detail (`--camera graticule`) | |
-
-## Architecture
-
-```mermaid
-flowchart LR
-  F["CSV / .ftxb<br/>memory-mapped"] --> I["Ingest<br/>parallel parse, dedup,<br/>partial aggregation,<br/>top-16 per currency"]
-  I --> M["Model<br/>edge merge, hub vote,<br/>CSR graph, whale events"]
-  M --> L["Layout thread<br/>octree + Barnes-Hut,<br/>triple-buffered snapshots"]
-  L --> R["Render thread<br/>globe mapping in shaders,<br/>6 instanced scene draws"]
-  R --> P["Post<br/>MSAA resolve, emissive bloom,<br/>ACES, sRGB"]
-  P --> O["Window or PNG"]
-```
-
-| Stage | Source | Notes |
-|---|---|---|
-| Ingest | `src/ingest/` | 16 MB chunks through a bounded MPMC queue; worker-private hash tables merged into a 64-shard registry; exact 128-bit sums. |
-| Model | `src/model/` | Hub assignment by majority vote, bridge detection, CSR adjacency, whale events mapped to replay time. |
-| Layout | `src/layout/` | Morton-sorted octree rebuilt every iteration, grouped SIMD repulsion, springs and anchors; runs on its own thread. |
-| Render | `src/render/` | Persistently mapped rings behind fences, reverse-Z infinite projection, RGBA16F scene and emissive targets, dual-filter bloom. |
-| App | `src/app/` | CLI, configuration, camera presets, viewer loop, screenshot path, headless benchmark. |
-
-[DESIGN_NOTES.md](DESIGN_NOTES.md) covers the threading model, memory
-layout, hashing, force model, renderer and measurements in detail.
+| ![London pinned: the hub panel with inflow, outflow, net and top counterparties, labelled MODELED + REPLAY](docs/screenshots/hub_panel_london.png) | ![Whale transfers in gold travelling their arcs](docs/screenshots/whale_event.png) |
+| Hub panel, London pinned | Whale transfers in flight |
+| ![Coastlines of Australia, New Zealand and Antarctica under the amber graticule](docs/screenshots/graticule_coastline.png) | ![The replay timeline paused at 01:40 of 02:00](docs/screenshots/replay_timeline.png) |
+| Graticule and coastlines | Replay timeline |
 
 ## Build
 
 Requirements:
 
 - CMake 3.20 or newer and Git (FetchContent clones the pinned
-  dependencies: GLFW 3.4, glad 2.0.8, GLM 1.0.1, xxHash 0.8.3 and
-  stb_image_write).
+  dependencies: GLFW 3.4, glad 2.0.8, GLM 1.0.1, xxHash 0.8.3,
+  simdjson 3.10.1 and stb_image_write).
+- OpenSSL 1.1.1 or newer (`libssl-dev`), for the TLS feeds.
 - A C++20 compiler: MSVC 2022, GCC 12+ or Clang 15+.
 - For the application: Python 3 with `jinja2` (glad generates its loader at
   build time) and an OpenGL 4.5 driver. 4.3 also works with
@@ -80,7 +55,7 @@ Requirements:
 ### Linux
 
 ```sh
-sudo apt install libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libegl-dev
+sudo apt install libssl-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libegl-dev
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ctest --test-dir build --output-on-failure
@@ -98,65 +73,60 @@ cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-`shaders/` and `config/` are copied next to the `ftviz` binary, so it runs
+`shaders/`, `config/` and `assets/` are copied next to the `ftviz` binary, so it runs
 from the build directory.
 
 | CMake option | Default | Effect |
 |---|---|---|
 | `FTVIZ_BUILD_APP` | ON | OpenGL application and render test |
 | `FTVIZ_BUILD_TESTS` | ON | `ftviz_tests` (no GPU needed) and `ftviz_render_tests` |
-| `FTVIZ_BUILD_TOOLS` | ON | `gen_synthetic` data generator |
+| `FTVIZ_BUILD_TOOLS` | ON | `gen_synthetic` and `gen_capture` generators |
 | `FTVIZ_WERROR` | OFF | Treat warnings as errors |
 | `FTVIZ_NATIVE` | OFF | `-march=native` |
 | `FTVIZ_GLFW_WAYLAND` | OFF | Build GLFW with Wayland support on Linux |
 
 To build without network access, point FetchContent at local checkouts with
 `-DFETCHCONTENT_SOURCE_DIR_<NAME>=<path>` for `GLFW`, `GLAD`, `GLM`,
-`XXHASH` and `STB`. `-DFTVIZ_BUILD_APP=OFF` builds the ingest, model,
+`XXHASH`, `SIMDJSON` and `STB`. `-DFTVIZ_BUILD_APP=OFF` builds the ingest, model,
 layout and their tests without any GL dependency.
 
 ## Usage
 
-Generate a dataset and open it:
-
 ```sh
-./build/gen_synthetic --rows 10000000 --out tx10m.csv --seed 42
-./build/ftviz --input tx10m.csv --prelayout 300
+./build/gen_synthetic --rows 300000 --out tx.csv --seed 42
+./build/ftviz --input tx.csv --prelayout 300              # graph + modeled corridors
+./build/ftviz --input tx.csv --live                       # public feeds
+./build/ftviz --input tx.csv --replay                     # bundled capture, seekable
+./build/ftviz --input tx.csv --live --export out --export-after 60   # export after 60 s, exit
 ```
 
-The layout keeps running while the window is open. The replay clock starts
-at once and loops every 120 s (`replay_seconds` in `config/render.json`).
+`--input` is always required: the transaction graph is the scene's base
+layer. `./build/ftviz --help` lists every option.
 
 | Input | Action |
 |---|---|
-| Left drag | orbit |
-| Right or middle drag | pan |
-| Wheel | zoom |
-| Click | select a node and highlight its 1-hop neighbourhood |
-| `1` to `9` | fly to hub 1 to 9 |
-| `0` | overview |
+| Left drag / right drag / wheel | orbit / pan / zoom |
+| Hover a hub | highlight it |
+| Click a hub | pin its panel |
+| Click a node | select it and its 1-hop neighbourhood |
+| `1` to `5` | view presets: globe, Americas, Europe, Asia, chain shell (1.2 s flight) |
+| `E` or the EXPORT button | export |
+| `Space` | pause or resume ingest, layout and clocks |
+| `Left` / `Right` | seek the replay 1 s; with `Shift`, 10 s |
+| Drag the timeline | scrub the replay |
 | `F` | frame the selection |
-| `E` | toggle inter-hub arcs |
-| `Space` | pause or resume the replay |
+| `D` | toggle inter-hub edge detail |
 | `L` / `R` | pause the layout / reheat it |
 | `H` | toggle the HUD |
-| `Esc` | clear the selection, or quit |
+| `Esc` | clear the pin or selection, then quit |
 
-Other modes:
+Configuration, all with `//` comments allowed:
 
-```sh
-./build/ftviz --input tx10m.csv --headless --layout-iters 50     # ingest + layout benchmark, no window
-./build/ftviz --input tx10m.csv --frames 600                     # exit after 600 frames, print frame times
-```
-
-`./build/ftviz --help` lists every option. Configuration lives in three
-files, all of which accept `//` comments:
-
-- `config/hubs.json`: hubs (layout anchor, globe coordinates, footprint,
-  label side), the jurisdiction-to-hub map and the force constants.
-- `config/render.json`: window, edge budgets, globe, replay and camera.
-- `config/theme.json`: the four colours and every alpha, width and
-  intensity, clamped to the ranges noted in the file.
+- `config/hubs.json`: hubs, jurisdiction map, force constants.
+- `config/render.json`: window, edge budgets, globe, replay, camera.
+- `config/theme.json`: the four colours and every alpha and width.
+- `config/feeds.json`: endpoints, labels, request limits, whale thresholds.
+- `config/flows_baseline.csv`: the modeled fiat corridors and their source.
 
 ### Input format
 
@@ -175,27 +145,72 @@ data as fixed 64-byte records plus a string pool
 
 ### Screenshots
 
-The gallery was produced with these commands, from a 300,000-row synthetic
-dataset with seed 42:
-
 ```sh
 ./build/gen_synthetic --rows 300000 --out s300k.csv --seed 42
-for p in hero_globe:globe hub_closeup_london:london whale_event:whale graticule_detail:graticule; do
-  ./build/ftviz --dataset s300k.csv --prelayout 300 --camera ${p#*:} --ui-scale 2 \
-    --width 3840 --height 2160 --warmup-frames 4 --screenshot docs/screenshots/${p%%:*}.png
-done
+C="--dataset s300k.csv --prelayout 300 --ui-scale 2 --width 3840 --height 2160 --warmup-frames 4 --replay"
+D=docs/screenshots
+./build/ftviz $C --camera globe --overlay --time 62 --screenshot $D/hero_globe.png
+./build/ftviz $C --camera hub:LONDON --overlay --pin LONDON --time 90 --screenshot $D/hub_panel_london.png
+./build/ftviz $C --camera whale --screenshot $D/whale_event.png
+./build/ftviz $C --camera graticule --screenshot $D/graticule_coastline.png
+./build/ftviz $C --camera globe --overlay --time 100 --paused --screenshot $D/replay_timeline.png
 ```
 
-Each run prints an XXH3 digest of the pixels. Rendering every image twice
-gave identical digests and byte-identical files. The images here were
-rendered with 4× MSAA, the most the driver on the capture machine offered;
-the renderer requests 8× and uses the driver's maximum when it is lower.
+Each image was rendered twice and the files were byte-identical. They were
+rendered with 4× MSAA, the driver's maximum on the capture machine; the
+renderer requests 8× and uses the driver's maximum when it is lower.
+
+## Data sources
+
+| Source | Label | Endpoint | What is shown |
+|---|---|---|---|
+| Bitcoin transactions | LIVE | `wss://ws.blockchain.info/inv` | unconfirmed transactions |
+| Bitcoin blocks | LIVE | `wss://mempool.space/api/v1/ws` | block headers and transaction counts |
+| Ethereum | LIVE | `wss://ethereum-rpc.publicnode.com` | transfers in each new block |
+| Solana | DELAYED | `api.mainnet-beta.solana.com` | up to 32 sampled transfers per block, 32 slots behind the tip |
+| Coinbase | LIVE | `wss://ws-feed.exchange.coinbase.com` | trades (`matches`) |
+| Kraken | LIVE | `wss://ws.kraken.com/v2` | trades |
+| Fiat corridors | MODELED | none | flat per-second flows derived from BIS Triennial Survey 2022 shares |
+| Capture | REPLAY | `assets/replay/default.ftxcap` | `--replay`, or any feed that has been down for 15 s |
+
+- The endpoints are public and need no key. TLS verification is always on.
+- Fiat flows are never observed. They are a model and are labelled MODELED.
+- The bundled capture is **synthetic**, generated by `tools/gen_capture.cpp`
+  with a fixed seed. It is not recorded market data, and the timeline and
+  `session.json` say so.
+- USD values use prices from the same feeds. Trades in EUR, GBP or JPY are
+  valued through the cross rate implied by the same exchange.
+- Exchange trades are drawn between the chain hub and the hub of the quote
+  currency's home market (USD: New York, EUR: Frankfurt, GBP: London, JPY:
+  Tokyo). This is a display convention, not a statement of where the
+  counterparties are.
+- Solana USD volume covers the sampled transfers only; nothing is
+  extrapolated.
+
+Rate limits and the state machine are in DESIGN_NOTES §11.
+
+## Export format
+
+An export is a directory `ftviz_export_<UTC timestamp>` with five files,
+each written to a temporary name and renamed:
+
+| File | Columns or content |
+|---|---|
+| `session.json` | format, version, git SHA, start and end UTC, mode, capture, label definitions, feeds (URL, label, state history, events, drops, USD total), modeled corridors with source URL, counters |
+| `hub_flows.csv` | `src_hub,dst_hub,currency,usd_volume,tx_count,source_label` |
+| `hub_flows.json` | the same flows nested as `flows[src][dst][]` |
+| `whales.csv` | `ts_utc,chain,asset,usd_value,tier,src,dst,source_label` |
+| `volume_tps.csv` | `ts_utc,feed,tx_count,usd_volume`, one row per second and feed; the feed name carries any label other than LIVE |
+
+Times are ISO 8601 UTC. CSV follows RFC 4180. Modeled corridors have
+`tx_count` 0 because no counts are published.
 
 ## Performance
 
-Measured on a 4-vCPU cloud VM (Intel Xeon @ 2.10 GHz, AVX-512), GCC 13.3,
-Release with LTO, on a 10M-row synthetic dataset (1,121 MB, 998,146
-entities, 7.76M aggregated edges):
+Measured on a 4-vCPU cloud VM (Intel Xeon @ 2.10 GHz), GCC 13.3, Release.
+
+Ingest and layout, 10M-row synthetic dataset (1,121 MB, 998,146 entities,
+7.76M aggregated edges):
 
 | Stage | Result |
 |---|---|
@@ -203,11 +218,16 @@ entities, 7.76M aggregated edges):
 | Ingest, whole stage | 3.93 s (2.55M rows/s) |
 | Graph build | 513 ms |
 | Layout at 1M nodes, 4 threads | 277 ms per iteration (mean of 20; p95 315 ms) |
-| Layout snapshot upload at 1M nodes | 0.70 ms per frame mean (≤ 4 MiB per frame) |
 
-Frame rates on a discrete GPU have not been measured yet. DESIGN_NOTES §10
-lists every measurement and the targets that remain open, including the
-layout's 50 ms per iteration goal on 8 cores.
+Rendering: **not yet measured on discrete GPU.** The only renderer
+available was Mesa llvmpipe, a software rasteriser. On it, at 2560×1440
+with 4× MSAA and the 300,000-row dataset, a v2 frame took 404.9 ms mean
+(p95 477.7 ms, 50 frames) against 331.2 ms for v1 (110 frames). Per-pass
+timings are in DESIGN_NOTES §10.1. These numbers do not predict GPU frame
+rates.
+
+Allocations, Debug build, 110 frames in `--replay`: 0 on the render thread
+in our code, 0 on the model thread.
 
 ## Tests
 
@@ -215,11 +235,24 @@ layout's 50 ms per iteration goal on 8 cores.
 ctest --test-dir build --output-on-failure
 ```
 
-- `ftviz_tests` (37 tests, no GPU): hashing, CSV and field parsers,
-  aggregation and its thread-count independence, whale selection, hub
-  assignment, octree accuracy against brute force, layout determinism and
-  the core concurrency primitives.
-- `ftviz_render_tests`: renders real frames offscreen and checks that the
-  background is within ±2 of `#050608`, that the frame holds at most four
-  hue clusters, and that emissive pixels appear only on active whale arcs
-  and flashes. It reports SKIP where no OpenGL 4.5 context is available.
+- `ftviz_tests` (81 tests, no GPU, no network): ingest, layout, feed
+  parsers against hand-written fixtures in the providers' documented
+  formats, rings, backoff, the feed state machine and fallback, model determinism and seek, export golden files,
+  picking and camera presets.
+- `ftviz_render_tests` (5 cases, offscreen): background colour, hue
+  clusters, emissive only on whales, coastline pixels, atmosphere rim,
+  a live whale arc. It
+  reports SKIP without an OpenGL 4.5 context.
+
+Live feeds are not exercised by the tests.
+
+## Attribution
+
+Coastlines: made with [Natural Earth](https://www.naturalearthdata.com/),
+release v5.1.2, 1:110m and 1:50m coastline layers. Public domain.
+
+Fiat corridor shares: BIS Triennial Central Bank Survey 2022, "OTC foreign
+exchange turnover in April 2022".
+
+[DESIGN_NOTES.md](DESIGN_NOTES.md) covers threading, memory layout, the
+renderer, live data, export and every measurement.

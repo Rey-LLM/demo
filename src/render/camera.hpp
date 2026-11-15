@@ -32,6 +32,8 @@ class OrbitCamera {
   [[nodiscard]] float distance() const noexcept { return distance_; }
   [[nodiscard]] float near_plane() const noexcept { return near_; }
   [[nodiscard]] float fov_y() const noexcept { return fov_; }
+  [[nodiscard]] float yaw() const noexcept { return yaw_; }
+  [[nodiscard]] float pitch() const noexcept { return pitch_; }
 
  private:
   // Current (smoothed) and goal values.

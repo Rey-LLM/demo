@@ -55,11 +55,12 @@ static_assert(sizeof(NodeStatic) == 8);
 
 }  // namespace
 
-Renderer::Renderer(const Graph& graph, const HubTaxonomy& taxonomy, const WhaleSet& whales,
+Renderer::Renderer(const Graph& graph, const HubTaxonomy& taxonomy, const WhaleSet& whales, const CoastlineSet& coast,
                    const RenderSettings& settings, const GlCaps& caps, std::string shaderDir)
     : graph_(graph),
       taxonomy_(taxonomy),
       whales_(whales),
+      coast_set_(coast),
       settings_(settings),
       caps_(caps),
       shader_dir_(std::move(shaderDir)),
@@ -79,6 +80,8 @@ bool Renderer::create_programs(std::string& error) {
   };
   const ShaderStage fsv{GL_VERTEX_SHADER, "fullscreen.vert"};
   if (!make(prog_globe_, {fsv, {GL_FRAGMENT_SHADER, "globe.frag"}})) return false;
+  if (!make(prog_atmo_, {{GL_VERTEX_SHADER, "atmosphere.vert"}, {GL_FRAGMENT_SHADER, "atmosphere.frag"}})) return false;
+  if (!make(prog_coast_, {{GL_VERTEX_SHADER, "continents.vert"}, {GL_FRAGMENT_SHADER, "continents.frag"}})) return false;
   if (!make(prog_node_, {{GL_VERTEX_SHADER, "node.vert"}, {GL_FRAGMENT_SHADER, "node.frag"}})) return false;
   if (!make(prog_arc_, {{GL_VERTEX_SHADER, "arc.vert"}, {GL_FRAGMENT_SHADER, "arc.frag"}})) return false;
   if (!make(prog_whale_, {{GL_VERTEX_SHADER, "whale.vert"}, {GL_FRAGMENT_SHADER, "whale.frag"}})) return false;
@@ -89,6 +92,7 @@ bool Renderer::create_programs(std::string& error) {
   if (!make(prog_up_, {fsv, {GL_FRAGMENT_SHADER, "bloom_up.frag"}})) return false;
   if (!make(prog_composite_, {fsv, {GL_FRAGMENT_SHADER, "composite.frag"}})) return false;
   if (!make(prog_present_, {fsv, {GL_FRAGMENT_SHADER, "present.frag"}})) return false;
+  loc_coast_first_ = glGetUniformLocation(prog_coast_.id(), "u_first");
   loc_arc_inter_ = glGetUniformLocation(prog_arc_.id(), "u_inter");
   loc_arc_first_ = glGetUniformLocation(prog_arc_.id(), "u_first");
   loc_arc_segments_ = glGetUniformLocation(prog_arc_.id(), "u_segments");
@@ -288,6 +292,17 @@ void Renderer::upload_static_data() {
     whales_buf_ = gl::create_buffer();
     glNamedBufferStorage(whales_buf_.id(), static_cast<GLsizeiptr>(w.size() * sizeof(GpuWhale)), w.data(), 0);
   }
+
+  // ---- coastlines (immutable: 1:110m segments, then 1:50m) ------------------------
+  {
+    coast_coarse_ = static_cast<std::uint32_t>(coast_set_.coarse_count);
+    coast_fine_ = static_cast<std::uint32_t>(coast_set_.fine_count);
+    const CoastSegment dummy{};
+    const void* data = coast_set_.segments.empty() ? static_cast<const void*>(&dummy) : coast_set_.segments.data();
+    const std::size_t bytes = std::max<std::size_t>(coast_set_.segments.size(), 1) * sizeof(CoastSegment);
+    coast_buf_ = gl::create_buffer();
+    glNamedBufferStorage(coast_buf_.id(), static_cast<GLsizeiptr>(bytes), data, 0);
+  }
 }
 
 bool Renderer::init(std::string& error) {
@@ -302,7 +317,9 @@ bool Renderer::init(std::string& error) {
   ubo_region_bytes_ = gl::align_up(static_cast<GLsizeiptr>(sizeof(FrameUniforms)), caps_.ubo_alignment);
   const std::size_t words = (N + 31) / 32;
   hl_region_bytes_ = gl::align_up(static_cast<GLsizeiptr>(words * 4), caps_.ssbo_alignment);
-  if (!positions_.create(pos_region_bytes_ * kSlots, GL_MAP_WRITE_BIT) ||
+  live_region_bytes_ = gl::align_up(static_cast<GLsizeiptr>(sizeof(LiveArcSlot) * kLiveArcSlots), caps_.ssbo_alignment);
+  if (!live_arcs_.create(live_region_bytes_ * kSlots, GL_MAP_WRITE_BIT) ||
+      !positions_.create(pos_region_bytes_ * kSlots, GL_MAP_WRITE_BIT) ||
       !uniforms_.create(ubo_region_bytes_ * kSlots, GL_MAP_WRITE_BIT) ||
       !highlight_.create(hl_region_bytes_ * kSlots, GL_MAP_WRITE_BIT)) {
     error = "failed to create persistently mapped buffers";
@@ -310,6 +327,7 @@ bool Renderer::init(std::string& error) {
   }
   std::memset(positions_.data(), 0, static_cast<std::size_t>(positions_.size()));
   std::memset(highlight_.data(), 0, static_cast<std::size_t>(highlight_.size()));
+  std::memset(live_arcs_.data(), 0, static_cast<std::size_t>(live_arcs_.size()));
   highlight_master_.assign(words, 0u);
   if (!picker_.create() || !hud_.create(caps_.ssbo_alignment)) {
     error = "failed to create picking / HUD buffers";
@@ -331,9 +349,10 @@ bool Renderer::init(std::string& error) {
   }
   glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);  // reverse-Z needs [0,1] clip depth
   glDisable(GL_CULL_FACE);
-  FTV_LOG_INFO("renderer: %zu nodes, %u intra + %u inter edges (budget %u / %u), %zu whale events, %u label glyphs; "
-               "init %.0f ms (shaders %.0f, static data %.0f)",
-               node_count_, intra_count_, inter_count_, intra_lod_, inter_lod_, whale_count_, label_glyphs_,
+  FTV_LOG_INFO("renderer: %zu nodes, %u intra + %u inter edges (budget %u / %u), %zu whale events, %u label glyphs, "
+               "%u + %u coastline segments; init %.0f ms (shaders %.0f, static data %.0f)",
+               node_count_, intra_count_, inter_count_, intra_lod_, inter_lod_, whale_count_, label_glyphs_, coast_coarse_,
+               coast_fine_,
                programsMs + staticMs + initClock.lap_ms(), programsMs, staticMs);
   return true;
 }
@@ -511,6 +530,10 @@ void Renderer::draw_frame(const FrameParams& p) {
       const float age = p.time - ev.start;
       if (age > 0.0f && age < span) ++active;
     }
+    for (const LiveArcSlot& l : live_master_) {
+      const float age = p.live_time - l.start;
+      if (l.used && age > 0.0f && age < span) ++active;
+    }
     counters_.active_whales = active;
   }
 
@@ -536,7 +559,14 @@ void Renderer::draw_frame(const FrameParams& p) {
   u.whale1 = glm::vec4(th.whale_intensity_max, th.whale_width_px[0], th.whale_width_px[1], th.whale_width_px[2]);
   u.counts = glm::uvec4(static_cast<std::uint32_t>(node_count_), selected_ ? *selected_ + 1u : 0u,
                         static_cast<std::uint32_t>(taxonomy_.size()), static_cast<std::uint32_t>(whale_count_));
+  u.coast = glm::vec4(th.coast[0], th.coast[1], th.coast[2], th.coast_alpha);
+  u.atmo = glm::vec4(th.atmo[0], th.atmo[1], th.atmo[2], (p.layers & kLayerAtmosphere) ? th.atmo_alpha : 0.0f);
+  u.atmo1 = glm::vec4(th.atmo_exponent, th.atmo_scale, p.live_time, 0.0f);
+  u.pick = glm::uvec4(p.hovered_hub >= 0 ? static_cast<std::uint32_t>(p.hovered_hub) + 1u : 0u,
+                      p.pinned_hub >= 0 ? static_cast<std::uint32_t>(p.pinned_hub) + 1u : 0u, kLiveArcSlots, p.layers);
   std::memcpy(static_cast<char*>(uniforms_.data()) + static_cast<std::size_t>(ubo_region_bytes_) * slot_, &u, sizeof(u));
+  std::memcpy(static_cast<char*>(live_arcs_.data()) + static_cast<std::size_t>(live_region_bytes_) * slot_,
+              live_master_.data(), sizeof(LiveArcSlot) * kLiveArcSlots);
   refresh_highlight_region(slot_);
 
   glBindBufferRange(GL_UNIFORM_BUFFER, 0, uniforms_.id(), ubo_region_bytes_ * slot_, sizeof(FrameUniforms));
@@ -546,6 +576,9 @@ void Renderer::draw_frame(const FrameParams& p) {
   glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 4, highlight_.id(), hl_region_bytes_ * slot_, hl_region_bytes_);
   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 9, labels_.id());
   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 10, whales_buf_.id());
+  glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 11, coast_buf_.id());
+  glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 12, live_arcs_.id(), live_region_bytes_ * slot_,
+                    static_cast<GLsizeiptr>(sizeof(LiveArcSlot) * kLiveArcSlots));
 
   // ---- scene target ------------------------------------------------------------
   glDisable(GL_FRAMEBUFFER_SRGB);
@@ -576,13 +609,40 @@ void Renderer::draw_frame(const FrameParams& p) {
 
   // Translucent passes test against the globe but do not write depth.
   glDepthMask(GL_FALSE);
+  const float altitude = glm::length(p.camera_pos) - g.radius;
+
+  // Pass 1b - atmosphere rim: sphere impostor at R * 1.015, scene attachment
+  // only (the emissive mask is still off), no depth test: it sits on the limb.
+  timers_.begin(slot_, GpuPass::Atmosphere);
+  glDisable(GL_DEPTH_TEST);
+  glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+  glUseProgram(prog_atmo_.id());
+  glDrawArrays(GL_TRIANGLES, 0, 3);  // layer off: alpha 0 in the uniforms, every fragment discards
+  ++counters_.scene_draws;
+  glEnable(GL_DEPTH_TEST);
+  timers_.end();
+
+  // Pass 1c - coastlines: one instance per segment, 1:50m below the close-zoom
+  // altitude (when loaded), 1:110m otherwise.
+  timers_.begin(slot_, GpuPass::Coast);
+  {
+    const bool fine = coast_fine_ > 0 && altitude < th.coast_close_altitude;
+    const std::uint32_t first = fine ? coast_coarse_ : 0u;
+    const std::uint32_t count = (p.layers & kLayerCoast) ? (fine ? coast_fine_ : coast_coarse_) : 0u;
+    counters_.coast_segments = count;
+    glUseProgram(prog_coast_.id());
+    glUniform1ui(loc_coast_first_, first);
+    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(count));
+    ++counters_.scene_draws;
+  }
+  timers_.end();
 
   // Pass 2 - nodes (premultiplied "over": a dense cluster saturates at ink).
   timers_.begin(slot_, GpuPass::Nodes);
   glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
   glUseProgram(prog_node_.id());
   glBindVertexArray(vao_nodes_.id());
-  glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(node_count_));
+  glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>((p.layers & kLayerNodes) ? node_count_ : 0));
   ++counters_.scene_draws;
   glBindVertexArray(vao_empty_.id());
   timers_.end();
@@ -591,9 +651,9 @@ void Renderer::draw_frame(const FrameParams& p) {
   timers_.begin(slot_, GpuPass::Arcs);
   glBlendFunc(GL_ONE, GL_ONE);
   glUseProgram(prog_arc_.id());
-  const float altitude = glm::length(p.camera_pos) - g.radius;
-  counters_.visible_intra = altitude <= settings_.intra_edge_max_altitude ? intra_lod_ : 0u;
-  counters_.visible_inter = p.inter_detail ? inter_lod_ : 0u;
+  const bool arcsOn = (p.layers & kLayerArcs) != 0;
+  counters_.visible_intra = arcsOn && altitude <= settings_.intra_edge_max_altitude ? intra_lod_ : 0u;
+  counters_.visible_inter = arcsOn && p.inter_detail ? inter_lod_ : 0u;
   glUniform1ui(loc_arc_inter_, 0u);
   glUniform1ui(loc_arc_first_, 0u);
   glDrawArraysInstanced(GL_LINES, 0, 2, static_cast<GLsizei>(counters_.visible_intra));
@@ -610,7 +670,8 @@ void Renderer::draw_frame(const FrameParams& p) {
   glColorMaski(1, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
   glUseProgram(prog_whale_.id());
   glUniform1i(loc_whale_segments_, segs);
-  glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 2 * (segs + 1), static_cast<GLsizei>(2 * whale_count_));
+  glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 2 * (segs + 1),
+                        static_cast<GLsizei>((p.layers & kLayerWhales) ? 2 * (whale_count_ + kLiveArcSlots) : 0));
   ++counters_.scene_draws;
   glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
   glColorMaski(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
@@ -622,7 +683,8 @@ void Renderer::draw_frame(const FrameParams& p) {
   glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
   glUseProgram(prog_hub_.id());
   glBindTextureUnit(1, label_atlas_.id());
-  glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(taxonomy_.size() + label_glyphs_));
+  glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4,
+                        static_cast<GLsizei>((p.layers & kLayerHubs) ? taxonomy_.size() + label_glyphs_ : 0));
   ++counters_.scene_draws;
   timers_.end();
   glColorMaski(1, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);

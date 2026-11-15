@@ -23,7 +23,19 @@ layout(std140, binding = 0) uniform Frame {
   vec4 u_whale0;     // flight s, trail s, flash s, intensity min
   vec4 u_whale1;     // intensity max, width tier1, tier2, tier3 (px)
   uvec4 u_counts;    // x node count, y selected node + 1 (0 = none), z hub count, w whale count
+  vec4 u_coast;      // rgb coastline (amber toward graphite), w alpha
+  vec4 u_atmo;       // rgb rim (amber), w alpha
+  vec4 u_atmo1;      // x Fresnel exponent, y shell scale, z live clock (s), w unused
+  uvec4 u_pick;      // x hovered hub + 1, y pinned hub + 1, z live arc slots, w layer mask
 };
+
+// Layer bits in u_pick.w (FrameParams::layers).
+const uint kLayerCoast = 1u;
+const uint kLayerAtmosphere = 2u;
+const uint kLayerNodes = 4u;
+const uint kLayerArcs = 8u;
+const uint kLayerWhales = 16u;
+const uint kLayerHubs = 32u;
 
 layout(std430, binding = 0) readonly buffer NodePositions { float node_pos[]; };
 
@@ -71,6 +83,32 @@ vec3 arc_point(vec3 a, vec3 b, float t) { return arc_point_lift(a, b, t, 1.0); }
 
 // Clip-space offset for `px` device pixels along a screen-space direction.
 vec2 px_to_clip(vec2 px, float w) { return px * 2.0 * u_viewport.zw * w; }
+
+// True when the straight line of sight from the camera to p passes through
+// the globe before reaching p (cheap analytic ray-sphere test). The margin
+// keeps points on or just above the surface visible.
+bool occluded_by_globe(vec3 p) {
+  vec3 ro = u_camera.xyz;
+  vec3 d = p - ro;
+  float L = length(d);
+  vec3 rd = d / max(L, 1e-6);
+  float R = u_globe.x * 0.999;
+  float b = dot(ro, rd);
+  float c = dot(ro, ro) - R * R;
+  float disc = b * b - c;
+  if (disc <= 0.0) return false;
+  float t0 = -b - sqrt(disc);
+  return t0 > 0.0 && t0 < L - u_globe.x * 0.002;
+}
+
+// Opacity factor from linearised view depth: 1.0 at the near side of the
+// scene sphere (camera distance - R) down to 0.35 at its far side (+ R).
+float depth_fade(vec3 p) {
+  float viewDepth = -(u_view * vec4(p, 1.0)).z;
+  float nearS = length(u_camera.xyz) - u_globe.x;
+  float k = clamp((viewDepth - nearS) / (2.0 * u_globe.x), 0.0, 1.0);
+  return mix(1.0, 0.35, k);
+}
 
 // Position far outside the clip volume: collapses a primitive.
 const vec4 kCulled = vec4(2.0, 2.0, 2.0, 1.0);

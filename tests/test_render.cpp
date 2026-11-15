@@ -4,7 +4,11 @@
 //   * the background is within +-2 of #050608 in every channel;
 //   * the frame holds at most 4 hue clusters (neutral ink + the warm hues);
 //   * the emissive attachment is lit only on the active whale arcs and
-//     flashes, and is black when no whale is in flight.
+//     flashes, and is black when no whale is in flight;
+//   * Natural Earth coastline pixels are present, dim, warm and never emissive;
+//   * the atmosphere rim adds light only near the limb and nothing emissive;
+//   * a live whale arc lights the emissive buffer along its hub-to-hub arc;
+//   * the draw count is the same whatever is enabled.
 // Exits with 77 (ctest SKIP) when no OpenGL 4.5 context can be created.
 
 #include <algorithm>
@@ -161,7 +165,12 @@ int main() {
   }
   int ran = 0;
   {
-    Renderer renderer(sc.graph, *sc.tax, sc.whales, sc.rs, ctx.caps(), src + "/shaders");
+    CoastlineSet coast;
+    if (!load_coastlines(src + "/assets", coast, err)) {
+      std::fprintf(stderr, "coastlines: %s\n", err.c_str());
+      return 1;
+    }
+    Renderer renderer(sc.graph, *sc.tax, sc.whales, coast, sc.rs, ctx.caps(), src + "/shaders");
     if (!renderer.init(err)) {
       std::fprintf(stderr, "renderer: %s\n", err.c_str());
       return 1;
@@ -174,6 +183,8 @@ int main() {
     camera.configure(sc.rs.camera_fov_deg, sc.rs.camera_near, sc.rs.camera_damping);
     const float aspect = static_cast<float>(kWidth) / static_cast<float>(kHeight);
 
+    std::uint32_t layers = 0xFFFFFFFFu;
+    float liveTime = 0.0f;
     auto render_at = [&](const std::string& preset, float time, glm::mat4& viewProj) {
       ViewSetup v;
       std::string e;
@@ -194,6 +205,8 @@ int main() {
         p.height = kHeight;
         p.show_hud = false;
         p.present = false;
+        p.layers = layers;
+        p.live_time = liveTime;
         renderer.draw_frame(p);
       }
       viewProj = p.proj * p.view;
@@ -341,6 +354,181 @@ int main() {
       CHECK(peak <= 1e-3f);
       CHECK(renderer.counters().active_whales == 0);
       std::fprintf(stderr, "[ %s ] render: emissive is empty when no whale is active\n",
+                   ftv::test::failure_count() == before ? " OK " : "FAIL");
+      ++ran;
+    }
+
+    // First replay time at which no dataset whale is in flight or flashing.
+    float quietT = -1.0f;
+    {
+      const float life = th.whale_flight_s + th.whale_flash_s + 0.05f;
+      for (float t = 0.05f; t < sc.whales.replay_seconds && quietT < 0.0f; t += 0.05f) {
+        bool busy = false;
+        for (const WhaleEvent& ev : sc.whales.events) busy = busy || (t >= ev.start - 0.05f && t < ev.start + life);
+        if (!busy) quietT = t;
+      }
+    }
+    auto read_rgb = [&](std::vector<std::uint8_t>& out) {
+      int w = 0, h = 0;
+      return renderer.read_output_rgba8(out, w, h) && w == kWidth && h == kHeight;
+    };
+    auto emissive_peak = [&]() {
+      std::vector<float> em;
+      int w = 0, h = 0;
+      float peak = -1.0f;
+      if (renderer.read_emissive(em, w, h)) {
+        peak = 0.0f;
+        for (float c : em) peak = std::max(peak, c);
+      }
+      return peak;
+    };
+
+    // ---- frame 3: coastlines ---------------------------------------------------------
+    {
+      std::fprintf(stderr, "[ RUN  ] render: coastline pixels are present, dim, warm and not emissive\n");
+      const int before = ftv::test::failure_count();
+      CHECK(coast.coarse_count > 1000);
+      CHECK(coast.segments.size() == coast.coarse_count + coast.fine_count);
+      glm::mat4 vp(1.0f);
+      std::vector<std::uint8_t> with, without;
+      layers = kLayerCoast;  // the globe pass always draws; everything else off
+      CHECK(render_at("globe", quietT, vp));
+      CHECK(read_rgb(with));
+      const std::uint32_t drawsWith = renderer.counters().draw_calls;
+      CHECK(renderer.counters().coast_segments == coast.coarse_count);
+      CHECK(emissive_peak() <= 1e-3f);
+      layers = 0;
+      CHECK(render_at("globe", quietT, vp));
+      CHECK(read_rgb(without));
+      CHECK(renderer.counters().draw_calls == drawsWith);  // a disabled layer still issues its draw
+      CHECK(renderer.counters().coast_segments == 0);
+      int changed = 0, tooBright = 0, cold = 0;
+      for (std::size_t i = 0; i + 3 < with.size(); i += 4) {
+        const int dr = with[i] - without[i], dg = with[i + 1] - without[i + 1], db = with[i + 2] - without[i + 2];
+        if (std::abs(dr) + std::abs(dg) + std::abs(db) < 6) continue;
+        ++changed;
+        if (std::max({with[i], with[i + 1], with[i + 2]}) > 150) ++tooBright;  // alpha 0.18-0.28 over near-black
+        if (!(dr >= dg && dg >= db)) ++cold;  // amber toward graphite: R >= G >= B
+      }
+      std::fprintf(stderr, "  %d coastline px (%d over the brightness cap, %d not warm)\n", changed, tooBright, cold);
+      CHECK(changed > 400);
+      CHECK(changed < kWidth * kHeight / 10);  // lines, not fills
+      CHECK(tooBright == 0);
+      CHECK(cold * 50 <= changed);
+      std::fprintf(stderr, "[ %s ] render: coastline pixels are present, dim, warm and not emissive\n",
+                   ftv::test::failure_count() == before ? " OK " : "FAIL");
+      ++ran;
+    }
+
+    // ---- frame 4: atmosphere rim -----------------------------------------------------
+    {
+      std::fprintf(stderr, "[ RUN  ] render: atmosphere is a rim only and has no emissive output\n");
+      const int before = ftv::test::failure_count();
+      glm::mat4 vp(1.0f);
+      std::vector<std::uint8_t> with, without;
+      layers = kLayerAtmosphere;
+      CHECK(render_at("globe", quietT, vp));
+      CHECK(read_rgb(with));
+      CHECK(emissive_peak() <= 1e-3f);
+      layers = 0;
+      CHECK(render_at("globe", quietT, vp));
+      CHECK(read_rgb(without));
+      // Globe centre and radius on screen.
+      const glm::vec4 c4 = vp * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+      const glm::vec2 centre((c4.x / c4.w * 0.5f + 0.5f) * kWidth, (0.5f - c4.y / c4.w * 0.5f) * kHeight);
+      const float dist = c4.w;  // view depth of the globe centre
+      const float f = 1.0f / std::tan(sc.rs.camera_fov_deg * kDegToRad * 0.5f);
+      const float R = sc.rs.globe.radius;
+      const float limb = R / std::sqrt(std::max(dist * dist - R * R, 1.0f)) * f * 0.5f * static_cast<float>(kHeight);
+      int rim = 0, inner = 0, outer = 0, strong = 0;
+      for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+          const std::size_t i = (static_cast<std::size_t>(y) * kWidth + static_cast<std::size_t>(x)) * 4;
+          const int d = std::abs(with[i] - without[i]) + std::abs(with[i + 1] - without[i + 1]) +
+                        std::abs(with[i + 2] - without[i + 2]);
+          if (d < 4) continue;
+          const float r = glm::length(glm::vec2(static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f) - centre) / limb;
+          if (r < 0.80f) {
+            ++inner;
+          } else if (r > 1.03f) {
+            ++outer;
+          } else {
+            ++rim;
+          }
+          // Amber at alpha <= 0.22 over the plain background (graticule lines
+          // under the rim are brighter by themselves and are left out).
+          if (std::max({without[i], without[i + 1], without[i + 2]}) < 16 &&
+              std::max({with[i], with[i + 1], with[i + 2]}) > 110) {
+            ++strong;
+          }
+        }
+      }
+      std::fprintf(stderr, "  limb radius %.1f px: %d rim px, %d inside 0.8 R, %d beyond 1.03 R, %d too bright\n",
+                   static_cast<double>(limb), rim, inner, outer, strong);
+      CHECK(rim > 200);
+      CHECK(inner == 0);
+      CHECK(outer == 0);
+      CHECK(strong == 0);
+      std::fprintf(stderr, "[ %s ] render: atmosphere is a rim only and has no emissive output\n",
+                   ftv::test::failure_count() == before ? " OK " : "FAIL");
+      ++ran;
+    }
+
+    // ---- frame 5: a live whale arc between two hubs -----------------------------------
+    {
+      std::fprintf(stderr, "[ RUN  ] render: a live whale arc is emissive along its hub-to-hub arc only\n");
+      const int before = ftv::test::failure_count();
+      const auto ny = sc.tax->find("NEW_YORK"), ln = sc.tax->find("LONDON");
+      CHECK(ny.has_value() && ln.has_value());
+      glm::mat4 vp(1.0f);
+      layers = 0xFFFFFFFFu;
+      liveTime = 100.0f;
+      LiveArcSlot slot;
+      slot.src_hub = *ny;
+      slot.dst_hub = *ln;
+      slot.tier = 3;
+      slot.used = 1;
+      slot.start = liveTime - th.whale_flight_s * 0.6f;  // head at 60 % of the arc
+      renderer.set_live_arc(5, slot);
+      CHECK(render_at("globe", quietT, vp));
+      CHECK(renderer.counters().active_whales == 1);
+      const std::uint32_t draws = renderer.counters().draw_calls;
+      std::vector<float> em;
+      int w = 0, h = 0;
+      CHECK(renderer.read_emissive(em, w, h));
+      const HubDef& a = sc.tax->hubs()[*ny];
+      const HubDef& b = sc.tax->hubs()[*ln];
+      const float rr = sc.rs.globe.radius * (1.0f + sc.rs.globe.node_altitude);
+      const glm::vec3 pa = geo_normal(a.lat_deg, a.lon_deg) * rr, pb = geo_normal(b.lat_deg, b.lon_deg) * rr;
+      std::vector<glm::vec2> path;
+      for (int k = 0; k <= 256; ++k) {
+        const glm::vec4 c = vp * glm::vec4(arc_point(pa, pb, static_cast<float>(k) / 256.0f, sc.rs.globe), 1.0f);
+        if (c.w > 1e-3f) path.push_back({(c.x / c.w * 0.5f + 0.5f) * static_cast<float>(w), (0.5f - c.y / c.w * 0.5f) * static_cast<float>(h)});
+      }
+      const float tol = (0.5f * th.whale_width_px[2] + 2.0f) * sc.rs.ui_scale + 1.5f;
+      int lit = 0, stray = 0;
+      for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+          const float* px = &em[(static_cast<std::size_t>(y) * static_cast<std::size_t>(w) + static_cast<std::size_t>(x)) * 4];
+          if (std::max({px[0], px[1], px[2]}) <= 1e-3f) continue;
+          ++lit;
+          const glm::vec2 p(static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f);
+          bool ok = false;
+          for (std::size_t k = 1; k < path.size() && !ok; ++k) ok = seg_dist(p, path[k - 1], path[k]) <= tol;
+          if (!ok) ++stray;
+        }
+      }
+      std::fprintf(stderr, "  %d lit emissive px on the live arc, %d elsewhere\n", lit, stray);
+      CHECK(lit > 0);
+      CHECK(stray == 0);
+      // Slot cleared: nothing emissive, same number of draws.
+      renderer.clear_live_arcs();
+      CHECK(render_at("globe", quietT, vp));
+      CHECK(emissive_peak() <= 1e-3f);
+      CHECK(renderer.counters().active_whales == 0);
+      CHECK(renderer.counters().draw_calls == draws);
+      liveTime = 0.0f;
+      std::fprintf(stderr, "[ %s ] render: a live whale arc is emissive along its hub-to-hub arc only\n",
                    ftv::test::failure_count() == before ? " OK " : "FAIL");
       ++ran;
     }

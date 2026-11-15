@@ -1,0 +1,25 @@
+{
+  "format": "ftviz-export/1",
+  "version": "2.0.0",
+  "git_sha": "0123456789ab",
+  "start_utc": "2026-11-15T04:40:00.000Z",
+  "end_utc": "2026-11-15T04:40:12.345Z",
+  "mode": "live",
+  "replay_capture": "assets/replay/default.ftxcap (SYNTHETIC)",
+  "labels": {
+    "LIVE": "received from a public endpoint during this session",
+    "DELAYED": "real data fetched deliberately behind the chain tip",
+    "MODELED": "derived from published aggregates, not observed",
+    "REPLAY": "played back from a capture file, not live"
+  },
+  "feeds": [
+    {"id": "BTC", "url": "wss://ws.blockchain.info/inv", "configured_label": "LIVE", "current_label": "LIVE", "state": "LIVE", "events": 77, "drops": 5, "usd_total": 12100.50,
+     "state_history": [{"at_utc": "2026-11-15T04:40:00.000Z", "state": "CONNECTING", "label": "LIVE"}, {"at_utc": "2026-11-15T04:40:00.400Z", "state": "OFFLINE", "label": "LIVE"}, {"at_utc": "2026-11-15T04:40:15.500Z", "state": "OFFLINE", "label": "REPLAY"}, {"at_utc": "2026-11-15T04:40:20.000Z", "state": "LIVE", "label": "LIVE"}]},
+    {"id": "FIAT", "url": null, "configured_label": "MODELED", "current_label": "MODELED", "state": "MODELED", "events": 0, "drops": 0, "usd_total": 60895833.33,
+     "state_history": []}
+  ],
+  "modeled_sources": [
+    {"currency": "GBP", "src_hub": "NEW_YORK", "dst_hub": "LONDON", "usd_per_day": 975000000000, "source_url": "https://www.bis.org/publications/202210-commentary-otc-derivatives", "as_of_date": "2022-04-30", "label": "MODELED"}
+  ],
+  "counters": {"whales": 2, "volume_rows": 4, "whale_journal_overflow": 0, "volume_journal_overflow": 0, "drops_total": 5}
+}

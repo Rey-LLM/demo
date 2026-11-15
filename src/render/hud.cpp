@@ -31,7 +31,7 @@ float HudRenderer::text(float x, float y, float scale, std::uint32_t rgba, std::
   for (char c : s) {
     unsigned code = static_cast<unsigned char>(c);
     if (code >= 'a' && code <= 'z') code -= 32;  // font is upper case only
-    if (code < 32 || code > 126) code = '?';
+    if (code < 32 || (code > 126 && (code < 128 || code > 130))) code = '?';
     if (code != ' ' && count_ < kMaxGlyphs) {
       base[count_++] = Glyph{x, y, static_cast<float>(kCellW) * scale, static_cast<float>(kCellH) * scale, code, rgba, 0, 0};
     }

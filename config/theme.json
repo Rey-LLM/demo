@@ -30,6 +30,21 @@
     "label_tracking_em": 0.14
   },
 
+  "coastline": {
+    "color": "#C8962E",                     // Amber ...
+    "blend_toward": "#3A3328",              // ... mixed toward graphite (same warm hue, darker)
+    "blend": 0.45,                          // 0 = pure amber, 1 = graphite
+    "alpha": 0.22,                          // 0.18 .. 0.28, 1 px analytic AA hairline
+    "close_zoom_altitude": 1400.0           // below this camera altitude the 1:50m set is drawn
+  },
+
+  "atmosphere": {
+    "color": "#C8962E",                     // Amber rim, never on the emissive attachment
+    "alpha": 0.20,                          // <= 0.22
+    "exponent": 5.0,                        // Fresnel pow(1 - N.V, 4 .. 6)
+    "scale": 1.015                          // shell radius / globe radius
+  },
+
   "whale": {
     "color": "#FFC23D",                     // "Neon Gold": the only emissive colour
     "intensity_min": 4.0,                   // HDR multiplier, tier 1 ...
@@ -41,7 +56,7 @@
   },
 
   "post": {
-    "bloom_strength": 1.0,                  // dual-filter Kawase, 5 mips, emissive only
+    "bloom_strength": 1.0,                  // dual-filter Kawase, 3 mips, emissive only
     "exposure": 0.6,                        // ACES fitted
     "vignette": 0.025                       // <= 0.03
   }

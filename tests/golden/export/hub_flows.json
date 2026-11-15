@@ -1,0 +1,24 @@
+{
+  "hubs": ["NEW_YORK", "LONDON", "OFF\"SHORE, X"],
+  "flows": {
+    "NEW_YORK": {
+      "LONDON": [
+        {"currency": "BTC", "usd_volume": 1234567.89, "tx_count": 42, "source_label": "LIVE"},
+        {"currency": "BTC", "usd_volume": 1000.50, "tx_count": 3, "source_label": "REPLAY"}
+      ],
+      "OFF\"SHORE, X": [
+        {"currency": "GBP", "usd_volume": 11284722.22, "tx_count": 0, "source_label": "MODELED"}
+      ]
+    },
+    "LONDON": {
+      "NEW_YORK": [
+        {"currency": "ETH", "usd_volume": 0.12, "tx_count": 1, "source_label": "DELAYED"}
+      ]
+    },
+    "OFF\"SHORE, X": {
+      "OFF\"SHORE, X": [
+        {"currency": "SOL", "usd_volume": 100.00, "tx_count": 7, "source_label": "LIVE"}
+      ]
+    }
+  }
+}

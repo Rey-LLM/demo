@@ -250,17 +250,18 @@ void HudStats::refresh(const FrameStats& f, const Renderer& r, const LayoutStatu
 
   // ---- key help -------------------------------------------------------------
   help_.clear();
-  help_.next().add(kDim).str("[LMB DRAG] ORBIT  [RMB/MMB DRAG] PAN  [WHEEL] ZOOM  [CLICK] SELECT  [1-9] HUB  [0] OVERVIEW");
+  help_.next().add(kDim).str(
+      "[LMB DRAG] ORBIT  [RMB/MMB DRAG] PAN  [WHEEL] ZOOM  [CLICK] PIN HUB / SELECT NODE  [1-5] VIEWS  [E] EXPORT");
   {
     Line& l = help_.next();
-    l.add(kDim).str("[F] FRAME  [E] INTER-HUB EDGES: ");
+    l.add(kDim).str("[F] FRAME  [D] INTER-HUB EDGES: ");
     l.add(f.inter_detail ? kGood : kWarn).str(f.inter_detail ? "ON" : "OFF");
     l.add(kDim).str("  [L] LAYOUT: ");
     l.add(!layout.running || layout.paused ? kWarn : kGood)
         .str(!layout.running ? "FROZEN" : (layout.paused ? "PAUSED" : "ON"));
-    l.add(kDim).str("  [R] REHEAT  [SPACE] REPLAY: ");
-    l.add(f.replay_paused ? kWarn : kGood).str(f.replay_paused ? "PAUSED" : "ON");
-    l.add(kDim).str("  T ").fixed(f.replay_time, 1).str(" S  [H] HUD  [ESC] CLEAR/QUIT");
+    l.add(kDim).str("  [R] REHEAT  [SPACE] ");
+    l.add(f.replay_paused ? kWarn : kGood).str(f.replay_paused ? "PAUSED" : "RUNNING");
+    l.add(kDim).str("  [</>] SEEK  T ").fixed(f.replay_time, 1).str(" S  [H] HUD  [ESC] CLEAR/QUIT");
   }
 }
 
@@ -292,12 +293,19 @@ void HudStats::emit(HudRenderer& hud, int width, int height) const noexcept {
   emit_block(hud, select_, margin, selY, s, true);
   emit_block(hud, help_, margin, static_cast<float>(height) - margin - static_cast<float>(help_.count) * lh, s, true);
 
-  // Hub legend in the top-right corner.
+  // Hub legend in the bottom-right corner (the top-right belongs to EXPORT
+  // and the hub panel).
   std::size_t maxChars = 0;
   for (std::size_t i = 0; i < legend_.count; ++i) maxChars = std::max(maxChars, legend_.lines[i].chars());
   const float adv = 6.0f * s;
   const float lx = static_cast<float>(width) - margin - static_cast<float>(maxChars) * adv;
-  emit_block(hud, legend_, lx, margin, s, true);
+  emit_block(hud, legend_, lx, static_cast<float>(height) - margin - static_cast<float>(legend_.count) * lh, s, true);
+}
+
+float HudStats::left_bottom(int height) const noexcept {
+  const float s = text_scale(height);
+  const float lh = HudRenderer::line_height(s);
+  return 10.0f * s + static_cast<float>(stats_.count + 1 + (select_.count ? select_.count + 1 : 0)) * lh;
 }
 
 }  // namespace ftv

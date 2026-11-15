@@ -19,6 +19,7 @@ flat out float v_fade;
 flat out uint v_kind;   // 0 marker, 1 glyph
 flat out float v_scale; // glyph: device px per atlas texel
 flat out float v_cell;  // glyph: first atlas column of its cell
+flat out float v_boost; // marker: 1.4 when hovered or pinned (+40 % alpha)
 
 const int kCellW = 6;
 const int kCellH = 8;
@@ -38,6 +39,7 @@ void main() {
   v_tex = vec2(0.0);
   v_scale = 1.0;
   v_cell = 0.0;
+  v_boost = (u_pick.x == g.hub + 1u || u_pick.y == g.hub + 1u) ? 1.4 : 1.0;
   if (ndv <= 0.05 || clip.w <= u_shape1.w) {
     v_kind = 0u;
     gl_Position = kCulled;

@@ -33,6 +33,13 @@ struct Theme {
   float label_alpha = 0.65f;
   float label_px = 11.0f;
   float label_tracking_em = 0.14f;
+  float coast[3] = {0.0f, 0.0f, 0.0f};       // amber blended toward graphite #3A3328 (linear)
+  float coast_alpha = 0.22f;                 // 0.18 .. 0.28
+  float coast_close_altitude = 1400.0f;      // 1:50m below this camera altitude, 1:110m above
+  float atmo[3] = {0.0f, 0.0f, 0.0f};        // amber rim (linear)
+  float atmo_alpha = 0.20f;                  // <= 0.22
+  float atmo_exponent = 5.0f;                // 4 .. 6
+  float atmo_scale = 1.015f;
   float whale_intensity_min = 4.0f;          // HDR multipliers, tier 1 .. tier 3
   float whale_intensity_max = 8.0f;
   float whale_width_px[3] = {2.0f, 3.0f, 4.0f};

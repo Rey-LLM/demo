@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"the method eth_subscribe newPendingTransactions does not exist/is not available"}}

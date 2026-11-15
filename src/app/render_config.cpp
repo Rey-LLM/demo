@@ -144,6 +144,23 @@ std::optional<Theme> theme_from_json(const JsonValue& root, std::string& error) 
   t.whale_trail_s = num(*whale, "trail_s", t.whale_trail_s, 0.05f, t.whale_flight_s);
   t.whale_flash_s = num(*whale, "flash_s", t.whale_flash_s, 0.05f, 10.0f);
 
+  {
+    const JsonValue* coast = root.find("coastline");
+    float base[3], toward[3];
+    if (!color(coast, "color", base, "coastline") || !color(coast, "blend_toward", toward, "coastline.blend_toward")) {
+      return std::nullopt;
+    }
+    const float k = num(*coast, "blend", 0.45f, 0.0f, 1.0f);
+    for (int i = 0; i < 3; ++i) t.coast[i] = base[i] + (toward[i] - base[i]) * k;
+    t.coast_alpha = num(*coast, "alpha", t.coast_alpha, 0.18f, 0.28f);
+    t.coast_close_altitude = num(*coast, "close_zoom_altitude", t.coast_close_altitude, 0.0f, 1e6f);
+    const JsonValue* atmo = root.find("atmosphere");
+    if (!color(atmo, "color", t.atmo, "atmosphere")) return std::nullopt;
+    t.atmo_alpha = num(*atmo, "alpha", t.atmo_alpha, 0.0f, 0.22f);
+    t.atmo_exponent = num(*atmo, "exponent", t.atmo_exponent, 4.0f, 6.0f);
+    t.atmo_scale = num(*atmo, "scale", t.atmo_scale, 1.001f, 1.05f);
+  }
+
   if (const JsonValue* post = root.find("post")) {
     t.bloom_strength = num(*post, "bloom_strength", t.bloom_strength, 0.0f, 4.0f);
     t.exposure = num(*post, "exposure", t.exposure, 0.1f, 8.0f);

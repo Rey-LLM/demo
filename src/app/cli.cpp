@@ -44,6 +44,15 @@ void print_usage(const char* argv0) {
       "  --chunk-mb N           ingest chunk size in MB (default 16)\n"
       "  --log-malformed K      print the first K malformed row offsets (default 8, max 16)\n"
       "\n"
+      "Live data\n"
+      "  --live                 start the public feed adapters (config/feeds.json); a feed that is\n"
+      "                         OFFLINE or RATE_LIMITED for 15 s falls back to REPLAY of the capture\n"
+      "  --replay [FILE.ftxcap] play a capture on its timeline (default: assets/replay/default.ftxcap)\n"
+      "  --feeds PATH           feed configuration (default: config/feeds.json next to the binary)\n"
+      "  --export DIR           directory for exports (E key / EXPORT button; default: current directory)\n"
+      "  --export-after S       write one export S seconds after start, then exit\n"
+      "  --pin HUB_ID           start with that hub's panel pinned\n"
+      "\n"
       "Modes\n"
       "  --headless             ingest + layout benchmark without a window\n"
       "  --layout-iters N       headless: run N iterations (default: until converged, max 5000)\n"
@@ -62,16 +71,18 @@ void print_usage(const char* argv0) {
       "  --camera Y,P,D         start camera yaw/pitch in degrees and distance\n"
       "  --time S               replay clock at start, seconds (default: preset, else 0)\n"
       "  --ui-scale S           device pixels per logical pixel for discs, rings, labels\n"
-      "  --no-detail            start with individual inter-hub edges hidden (toggle: E)\n"
+      "  --no-detail            start with individual inter-hub edges hidden (toggle: D)\n"
+      "  --overlay              screenshot: draw the live HUD layer (feeds, hub panel, timeline)\n"
       "  --paused               start with the layout paused (toggle: L)\n"
       "  --no-hud               start with the HUD hidden (toggle: H)\n"
       "  --no-gl-debug          do not request a debug context\n"
       "  --no-alloc-assert      Debug builds: warn instead of abort on per-frame allocations\n"
       "\n"
-      "Controls: left-drag orbit, right/middle-drag pan, wheel zoom, click select,\n"
-      "  1-9 fly to hub, 0 overview, F frame selection, E inter-hub edge detail,\n"
-      "  L pause/resume layout, R reheat layout, Space pause/resume replay,\n"
-      "  H toggle HUD, Esc clear selection / quit.\n",
+      "Controls: left-drag orbit, right/middle-drag pan, wheel zoom, click a hub to pin its panel,\n"
+      "  click a node to select it, 1-5 view presets (globe, Americas, Europe, Asia, chain shell),\n"
+      "  E export, Space pause/resume (ingest, layout, clocks), Left/Right seek 1 s (Shift: 10 s),\n"
+      "  drag the timeline to scrub, F frame selection, D inter-hub edge detail, L layout,\n"
+      "  R reheat layout, H toggle HUD, Esc clear pin / selection, then quit.\n",
       argv0);
 }
 
@@ -211,6 +222,28 @@ bool parse_cli(int argc, char** argv, CliOptions& o, std::string& error) {
       o.cam_yaw_deg = vals[0];
       o.cam_pitch_deg = vals[1];
       o.cam_distance = vals[2];
+    } else if (a == "--live") {
+      o.live = true;
+    } else if (a == "--replay") {
+      o.replay = true;
+      if (i + 1 < argc && argv[i + 1][0] != '-' && std::string_view(argv[i + 1]).ends_with(".ftxcap")) {
+        o.replay_path = argv[++i];
+      }
+    } else if (a == "--feeds") {
+      if (!str(o.feeds_path)) return false;
+    } else if (a == "--export") {
+      if (!str(o.export_dir)) return false;
+    } else if (a == "--export-after") {
+      std::string_view v;
+      if (!value(v)) return false;
+      if (!parse_float(v, o.export_after) || !(o.export_after >= 0.0f)) {
+        error = "invalid value for --export-after";
+        return false;
+      }
+    } else if (a == "--pin") {
+      if (!str(o.pin_hub)) return false;
+    } else if (a == "--overlay") {
+      o.overlay = true;
     } else if (a == "--no-detail") {
       o.inter_detail = false;
     } else if (a == "--paused") {
@@ -230,6 +263,10 @@ bool parse_cli(int argc, char** argv, CliOptions& o, std::string& error) {
   }
   if (!o.help && o.input.empty()) {
     error = "--input is required";
+    return false;
+  }
+  if (o.live && o.replay) {
+    error = "--live and --replay are mutually exclusive";
     return false;
   }
   if (o.width < 0 || o.height < 0 || o.width > 16384 || o.height > 16384) {

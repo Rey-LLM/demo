@@ -12,7 +12,11 @@ inline constexpr int kGlyphH = 7;
 inline constexpr int kCellW = 6;
 inline constexpr int kCellH = 8;
 inline constexpr int kGlyphFirst = 32;
-inline constexpr int kGlyphCount = 96;  // 32..127; 127 is a solid block (panels)
+inline constexpr int kGlyphCount = 99;  // 32..130; 127 is a solid block (panels)
+// HUD symbols after the ASCII range (use as single chars in HUD strings).
+inline constexpr char kGlyphDot = '\x80';    // filled dot: a feed that is LIVE
+inline constexpr char kGlyphRing = '\x81';   // outlined ring: a feed on REPLAY
+inline constexpr char kGlyphArrow = '\x82';  // right arrow
 
 // Returns atlas pixels (kGlyphCount*kCellW x kCellH, one byte per pixel).
 std::vector<std::uint8_t> build_font_atlas();

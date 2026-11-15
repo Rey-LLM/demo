@@ -4,15 +4,17 @@
 //
 //   scene (8x MSAA, RGBA16F colour + RGBA16F emissive MRT + 32F depth)
 //     Pass 1  globe + graticule  glDrawArrays(GL_TRIANGLES, 0, 3)            fullscreen ray cast
+//     Pass 1b atmosphere rim     glDrawArrays(GL_TRIANGLES, 0, 3)            sphere impostor, scene only
+//     Pass 1c coastlines         glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, segments)
 //     Pass 2  nodes              glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, N)
 //     Pass 3  arcs               glDrawArraysInstanced(LINES, 0, 2, intra)
 //                                glDrawArraysInstanced(LINE_STRIP, 0, S+1, inter)
-//     Pass 4  whales (emissive)  glDrawArraysInstanced(TRIANGLE_STRIP, 0, 2(S+1), 2W)
+//     Pass 4  whales (emissive)  glDrawArraysInstanced(TRIANGLE_STRIP, 0, 2(S+1), 2(W+L))
 //     Pass 5  hub markers+labels glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, H+G)
 //     Pass 6  picking            glDrawArraysInstanced (only on click)
 //   post
 //     MSAA resolve (2 blits), bloom on the emissive attachment only:
-//     5 dual-filter downsamples + 4 upsamples, composite (ACES fitted),
+//     3 dual-filter downsamples + 2 upsamples, composite (ACES fitted),
 //     HUD, present: all fullscreen glDrawArrays(GL_TRIANGLES, 0, 3) or one
 //     instanced HUD draw.
 // No glDrawElements*, no indirect draws.
@@ -36,6 +38,7 @@
 #include "model/graph.hpp"
 #include "model/hub_taxonomy.hpp"
 #include "model/whales.hpp"
+#include "render/coastlines.hpp"
 #include "render/gl_context.hpp"
 #include "render/gl_raii.hpp"
 #include "render/gpu_timers.hpp"
@@ -56,7 +59,26 @@ struct FrameParams {
   bool inter_detail = true;  // E key
   bool show_hud = true;
   bool present = true;       // copy the output to the default framebuffer (false: offscreen only)
+  float live_time = 0.0f;    // live clock (s) for live whale arcs
+  std::uint32_t layers = 0xFFFFFFFFu;  // kLayer* bits; a disabled layer issues its draw with 0 instances
+  int hovered_hub = -1;
+  int pinned_hub = -1;
 };
+
+// Layer bits for FrameParams::layers (mirrored in common.glsl).
+inline constexpr std::uint32_t kLayerCoast = 1u;
+inline constexpr std::uint32_t kLayerAtmosphere = 2u;
+inline constexpr std::uint32_t kLayerNodes = 4u;
+inline constexpr std::uint32_t kLayerArcs = 8u;
+inline constexpr std::uint32_t kLayerWhales = 16u;
+inline constexpr std::uint32_t kLayerHubs = 32u;
+
+// One live whale arc slot (hub to hub, on the live clock).
+struct LiveArcSlot {
+  std::uint32_t src_hub = 0, dst_hub = 0, tier = 1, used = 0;
+  float start = 0.0f, pad0 = 0.0f, pad1 = 0.0f, pad2 = 0.0f;
+};
+static_assert(sizeof(LiveArcSlot) == 32);
 
 struct RenderCounters {
   std::uint32_t visible_intra = 0;  // intra arcs submitted this frame
@@ -64,7 +86,8 @@ struct RenderCounters {
   std::uint32_t scene_draws = 0;    // instanced scene-geometry draws
   std::uint32_t post_draws = 0;     // fullscreen + HUD draws
   std::uint32_t draw_calls = 0;     // total
-  std::uint32_t active_whales = 0;  // whale events in flight or flashing (CPU-side count)
+  std::uint32_t active_whales = 0;  // whale events in flight or flashing (CPU-side count, incl. live arcs)
+  std::uint32_t coast_segments = 0; // coastline segments submitted this frame
   std::uint64_t snapshot_iteration = 0;
   std::uint64_t snapshots_uploaded = 0;
   float fence_wait_ms = 0.0f;  // CPU time blocked on the frame-slot fence (GPU-bound time)
@@ -74,14 +97,15 @@ struct RenderCounters {
 class Renderer {
  public:
   static constexpr unsigned kSlots = 3;
-  static constexpr int kBloomLevels = 5;
+  static constexpr int kBloomLevels = 3;   // two mips tighter than v1: a sharper whale glow
+  static constexpr std::uint32_t kLiveArcSlots = 64;  // live whale arcs drawn concurrently
   static constexpr std::uint32_t kMaxVisibleEdges = 2000000;  // hard cap on drawn edges per frame
   // Most bytes of a layout snapshot copied into the position ring per frame,
   // so a 1M-node snapshot (12 MB) is spread over 3 frames.
   static constexpr std::size_t kUploadBytesPerFrame = std::size_t{4} << 20;
 
-  Renderer(const Graph& graph, const HubTaxonomy& taxonomy, const WhaleSet& whales, const RenderSettings& settings,
-           const GlCaps& caps, std::string shaderDir);
+  Renderer(const Graph& graph, const HubTaxonomy& taxonomy, const WhaleSet& whales, const CoastlineSet& coast,
+           const RenderSettings& settings, const GlCaps& caps, std::string shaderDir);
   ~Renderer();
   Renderer(const Renderer&) = delete;
   Renderer& operator=(const Renderer&) = delete;
@@ -100,6 +124,13 @@ class Renderer {
   // Selection highlight (1-hop neighbourhood) as bits in a small SSBO.
   void set_selection(std::optional<std::uint32_t> node);
   [[nodiscard]] std::optional<std::uint32_t> selection() const noexcept { return selected_; }
+
+  // Live whale arcs: a fixed array of slots copied into the frame slot's
+  // region of a persistently mapped ring each frame (2 KiB, no allocation).
+  void set_live_arc(std::uint32_t slot, const LiveArcSlot& arc) noexcept {
+    if (slot < kLiveArcSlots) live_master_[slot] = arc;
+  }
+  void clear_live_arcs() noexcept { live_master_ = {}; }
 
   void request_pick(int x, int y) noexcept { picker_.request(x, y); }
   bool poll_pick(std::optional<std::uint32_t>& node) noexcept { return picker_.poll(node); }
@@ -133,6 +164,10 @@ class Renderer {
     glm::vec4 shape0, shape1;
     glm::vec4 whale0, whale1;
     glm::uvec4 counts;
+    glm::vec4 coast;
+    glm::vec4 atmo;
+    glm::vec4 atmo1;
+    glm::uvec4 pick;
   };
 
   bool create_programs(std::string& error);
@@ -144,15 +179,18 @@ class Renderer {
   const Graph& graph_;
   const HubTaxonomy& taxonomy_;
   const WhaleSet& whales_;
+  const CoastlineSet& coast_set_;
   RenderSettings settings_;
   GlCaps caps_;
   std::string shader_dir_;
   std::vector<HubFrame> hub_frames_;
 
   // Programs.
+  gl::Program prog_atmo_, prog_coast_;
   gl::Program prog_globe_, prog_node_, prog_arc_, prog_whale_, prog_hub_, prog_pick_, prog_hud_;
   gl::Program prog_down_, prog_up_, prog_composite_, prog_present_;
   GLint loc_arc_inter_ = -1, loc_arc_first_ = -1, loc_arc_segments_ = -1, loc_whale_segments_ = -1;
+  GLint loc_coast_first_ = -1;
   GLint loc_down_texel_ = -1, loc_up_texel_ = -1;
   GLint loc_comp_bg_ = -1, loc_comp_exposure_ = -1, loc_comp_bloom_ = -1, loc_comp_vignette_ = -1;
   GLint loc_present_encode_ = -1;
@@ -167,13 +205,16 @@ class Renderer {
   gl::Buffer hubs_;
   gl::Buffer labels_;
   gl::Buffer whales_buf_;
+  gl::Buffer coast_buf_;
   gl::Texture label_atlas_;
 
   // Persistently mapped rings.
   gl::PersistentBuffer positions_;  // 3 regions of N*12 bytes
   gl::PersistentBuffer uniforms_;   // 3 regions
   gl::PersistentBuffer highlight_;  // 3 regions of ceil(N/32)*4 bytes
-  GLsizeiptr pos_region_bytes_ = 0, ubo_region_bytes_ = 0, hl_region_bytes_ = 0;
+  gl::PersistentBuffer live_arcs_;  // 3 regions of kLiveArcSlots * 32 bytes
+  GLsizeiptr pos_region_bytes_ = 0, ubo_region_bytes_ = 0, hl_region_bytes_ = 0, live_region_bytes_ = 0;
+  std::array<LiveArcSlot, kLiveArcSlots> live_master_{};
   std::array<unsigned, kSlots> pos_region_of_slot_{};
   unsigned pos_region_ = 0;
   // Amortised snapshot upload: the region being filled from `fill_source_`
@@ -212,6 +253,7 @@ class Renderer {
 
   std::size_t node_count_ = 0;
   std::size_t whale_count_ = 0;
+  std::uint32_t coast_coarse_ = 0, coast_fine_ = 0;
   std::uint32_t label_glyphs_ = 0;
   std::uint32_t intra_count_ = 0, inter_count_ = 0;
   std::uint32_t intra_lod_ = 0, inter_lod_ = 0;

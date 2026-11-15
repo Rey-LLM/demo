@@ -1,0 +1,1 @@
+{"channel":"ticker","type":"snapshot","data":[{"symbol":"SOL/USD","bid":149.9,"bid_qty":10.0,"ask":150.1,"ask_qty":12.5,"last":150.0,"volume":250000.0,"vwap":149.5,"low":145.0,"high":152.0,"change":1.5,"change_pct":1.01}]}

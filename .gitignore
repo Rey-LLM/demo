@@ -74,6 +74,15 @@ out/
 .vs/
 .vscode/
 
-# Logs, traces and benchmark dumps
+# Logs, traces and benchmark dumps (*.log is listed above)
 *.trace
 benchmark_*.txt
+
+# Exports and captures (the bundled replay capture is tracked)
+ftviz_export_*/
+*.ftxcap
+!assets/replay/*.ftxcap
+
+# Local build directories
+b-*/
+cmake-build-*/

@@ -1,0 +1,77 @@
+{
+  // Public, zero-auth, documented endpoints only. TLS verification is always
+  // on. Rate limits are recorded with their sources in DESIGN_NOTES.md §11.
+  //
+  // label: what a message from this feed is when it arrives (LIVE, or
+  //   DELAYED for data fetched behind the tip). A feed that falls back to the
+  //   bundled capture is shown as REPLAY instead, wherever it appears.
+  // whale_usd: single events at or above this USD value become whale events
+  //   (tier 2 at 3x, tier 3 at 10x).
+  "fallback_after_s": 15,        // OFFLINE or RATE_LIMITED this long -> REPLAY of the capture
+  "stale_after_s": 30,           // LIVE but silent this long -> DEGRADED, then reconnect
+  "max_frame_bytes": 8388608,    // 8 MB
+  "backoff_base_s": 0.5,
+  "backoff_cap_s": 30,
+  "replay_capture": "assets/replay/default.ftxcap",
+
+  // Fiat quote currency -> hub that stands for its home market (a display
+  // convention for exchange trades; documented in the README).
+  "quote_hubs": { "USD": "NEW_YORK", "EUR": "FRANKFURT", "GBP": "LONDON", "JPY": "TOKYO", "HKD": "HONG_KONG" },
+  "chain_hubs": { "BTC": "BLOCKCHAIN_BTC", "ETH": "BLOCKCHAIN_ETH", "SOL": "BLOCKCHAIN_SOL" },
+
+  "feeds": [
+    {
+      "id": "BTC", "enabled": true, "label": "LIVE",
+      "url": "wss://ws.blockchain.info/inv",
+      "docs": "https://www.blockchain.com/explorer/api/api_websocket",
+      "subscribe": ["{\"op\":\"unconfirmed_sub\"}"],
+      "whale_usd": 1000000
+    },
+    {
+      "id": "BTC_BLOCKS", "enabled": true, "label": "LIVE",
+      "url": "wss://mempool.space/api/v1/ws",
+      "docs": "https://mempool.space/docs/api/websocket",
+      "subscribe": ["{\"action\":\"want\",\"data\":[\"blocks\"]}"],
+      "whale_usd": 0
+    },
+    {
+      "id": "ETH", "enabled": true, "label": "LIVE",
+      "url": "wss://ethereum-rpc.publicnode.com",
+      "docs": "https://ethereum.org/en/developers/docs/apis/json-rpc/",
+      "try_pending": true,
+      "max_requests_per_s": 2,
+      "whale_usd": 1000000
+    },
+    {
+      "id": "SOL", "enabled": true, "label": "DELAYED",
+      "url": "wss://api.mainnet-beta.solana.com",
+      "rpc_url": "https://api.mainnet-beta.solana.com",
+      "docs": "https://solana.com/docs/rpc",
+      "max_requests_per_s": 3,
+      "slot_lag": 32,
+      "sample_cap": 32,
+      "whale_usd": 250000
+    },
+    {
+      "id": "COINBASE", "enabled": true, "label": "LIVE",
+      "url": "wss://ws-feed.exchange.coinbase.com",
+      "docs": "https://docs.cdp.coinbase.com/exchange/docs/websocket-channels",
+      "subscribe": ["{\"type\":\"subscribe\",\"product_ids\":[\"BTC-USD\",\"ETH-USD\",\"SOL-USD\",\"BTC-EUR\",\"ETH-EUR\",\"BTC-GBP\",\"ETH-GBP\"],\"channels\":[\"matches\",\"ticker\",\"heartbeat\"]}"],
+      "whale_usd": 250000
+    },
+    {
+      "id": "KRAKEN", "enabled": true, "label": "LIVE",
+      "url": "wss://ws.kraken.com/v2",
+      "docs": "https://docs.kraken.com/api/docs/websocket-v2/trade",
+      "subscribe": [
+        "{\"method\":\"subscribe\",\"params\":{\"channel\":\"trade\",\"symbol\":[\"BTC/USD\",\"ETH/USD\",\"SOL/USD\",\"BTC/EUR\",\"ETH/EUR\",\"BTC/GBP\",\"BTC/JPY\"],\"snapshot\":false}}",
+        "{\"method\":\"subscribe\",\"params\":{\"channel\":\"ticker\",\"symbol\":[\"BTC/USD\",\"ETH/USD\",\"SOL/USD\",\"BTC/EUR\",\"ETH/EUR\",\"BTC/GBP\",\"BTC/JPY\"]}}"
+      ],
+      "whale_usd": 250000
+    }
+  ],
+
+  // Fiat corridors are never observed: they are MODELED from published
+  // aggregates (config/flows_baseline.csv) and labelled MODELED everywhere.
+  "fiat_model": { "enabled": true, "baseline": "config/flows_baseline.csv" }
+}

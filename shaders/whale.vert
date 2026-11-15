@@ -1,9 +1,12 @@
 #version 450 core
-// Pass 4: whale events, the only emissive element. One draw with 2W
-// instances: [0, W) are arc ribbons (2 / 3 / 4 px by tier) with a travelling
-// head and a short trail, [W, 2W) are the single flash at the destination.
-// Inactive events collapse to an off-screen point, so the draw is the same
-// every frame. Output goes to the emissive attachment only.
+// Pass 4: whale events, the only emissive element. One draw with 2T
+// instances, T = W + L: [0, T) are arc ribbons (2 / 3 / 4 px by tier) with a
+// travelling head and a short trail, [T, 2T) the single flash at the
+// destination. W dataset whales (node to node, replay clock) are followed by
+// L live arc slots (hub to hub, live clock), fed from the model thread's
+// visual events through a persistently mapped ring. Inactive instances
+// collapse to an off-screen point, so the draw is the same every frame.
+// Output goes to the emissive attachment only.
 #include "common.glsl"
 
 struct Whale {
@@ -11,6 +14,12 @@ struct Whale {
   vec4 timing;   // x start (replay s), y tier (1..3)
 };
 layout(std430, binding = 10) readonly buffer Whales { Whale whales[]; };
+
+struct LiveArc {
+  uvec4 hubs;    // x src hub, y dst hub, z tier (1..3), w 1 = slot in use
+  vec4 timing;   // x start (live clock s)
+};
+layout(std430, binding = 12) readonly buffer LiveArcs { LiveArc live_arcs[]; };
 
 uniform int u_segments;
 
@@ -22,19 +31,40 @@ flat out float v_trail; // trail length in arc parameter units
 flat out float v_halfw; // ribbon half-width / flash radius (device px)
 flat out float v_intensity;
 flat out uint v_kind;   // 0 arc, 1 flash
+out float v_fade;       // depth fade (1.0 near .. 0.35 far), like the normal arcs
 
 const vec2 kCorners[4] = vec2[4](vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0), vec2(1.0, 1.0));
 
+vec3 hub_surface(uint h) { return hubs[h].geo.xyz * (u_globe.x * (1.0 + u_globe.y)); }
+
 void main() {
   uint W = u_counts.w;
+  uint T = W + u_pick.z;
   uint inst = uint(gl_InstanceID);
-  bool flash = inst >= W;
-  Whale w = whales[flash ? inst - W : inst];
-  vec3 a = globe_position(node_layout_position(w.nodes.x), w.nodes.z);
-  vec3 b = globe_position(node_layout_position(w.nodes.y), w.nodes.w);
+  bool flash = inst >= T;
+  uint idx = flash ? inst - T : inst;
+  vec3 a, b;
+  float age, tierF;
+  if (idx < W) {
+    Whale w = whales[idx];
+    a = globe_position(node_layout_position(w.nodes.x), w.nodes.z);
+    b = globe_position(node_layout_position(w.nodes.y), w.nodes.w);
+    age = u_camera.w - w.timing.x;
+    tierF = w.timing.y;
+  } else {
+    LiveArc l = live_arcs[idx - W];
+    if (l.hubs.w == 0u) {
+      gl_Position = kCulled;
+      v_kind = 0u;
+      return;
+    }
+    a = hub_surface(l.hubs.x);
+    b = hub_surface(l.hubs.y);
+    age = u_atmo1.z - l.timing.x;
+    tierF = float(l.hubs.z);
+  }
   float flight = u_whale0.x, trailS = u_whale0.y, flashS = u_whale0.z;
-  float age = u_camera.w - w.timing.x;
-  uint tier = uint(clamp(w.timing.y, 1.0, 3.0));
+  uint tier = uint(clamp(tierF, 1.0, 3.0));
   float peak = mix(u_whale0.w, u_whale1.x, float(tier - 1u) * 0.5);  // HDR intensity 4..8 by tier
   float ui = u_ink.w;
   v_t = 0.0;
@@ -43,6 +73,7 @@ void main() {
   v_head = age / flight;
   v_trail = trailS / flight;
   v_intensity = peak;
+  v_fade = 1.0;
 
   if (!flash) {
     v_kind = 0u;
@@ -74,6 +105,7 @@ void main() {
     cp.xy += px_to_clip(nrm * side * extent, cp.w);
     v_t = t;
     v_side = side * extent;
+    v_fade = occluded_by_globe(p) ? 0.0 : depth_fade(p);
     gl_Position = cp;
   } else {
     v_kind = 1u;
@@ -90,6 +122,7 @@ void main() {
     }
     v_halfw = mix(2.0, 12.0, sqrt(k)) * ui;     // expanding ring radius
     v_intensity = peak * (1.0 - k) * (1.0 - k);  // decays to zero
+    v_fade = occluded_by_globe(b) ? 0.0 : depth_fade(b);
     float extent = v_halfw + 2.0 * ui + 1.0;
     // The strip has 2(S+1) vertices; the ones past the quad repeat its last
     // corner so they add only degenerate triangles (collapsing them to an

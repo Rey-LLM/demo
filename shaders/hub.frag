@@ -7,6 +7,7 @@ flat in float v_fade;
 flat in uint v_kind;
 flat in float v_scale;
 flat in float v_cell;
+flat in float v_boost;
 
 layout(binding = 1) uniform sampler2D u_font;  // 1-row glyph atlas, linear filtering
 layout(location = 0) out vec4 o_color;
@@ -31,7 +32,7 @@ void main() {
     float d = length(v_px);
     float ring = clamp(0.5 * u_shape0.z * ui + 0.5 - abs(d - u_shape0.w * ui), 0.0, 1.0);
     float dotCov = clamp(0.5 * u_shape1.x * ui + 0.5 - d, 0.0, 1.0);
-    a = max(ring * u_alpha1.z, dotCov * u_alpha1.z);
+    a = min(max(ring * u_alpha1.z * v_boost, dotCov * u_alpha1.z), 1.0);
   } else {
     // Ink, plus a one-texel obsidian halo (the scene's zero) so a label stays
     // legible where it crosses bright arcs.

@@ -19,6 +19,9 @@
 #include <xxhash.h>
 
 #include "app/hud_stats.hpp"
+#include "app/interaction.hpp"
+#include "app/live_hud.hpp"
+#include "app/live_session.hpp"
 #include "app/render_config.hpp"
 #include "core/alloc_counter.hpp"
 #include "core/fixed_text.hpp"
@@ -36,6 +39,8 @@
 #include "app/camera_presets.hpp"
 #include "app/png_writer.hpp"
 #include "render/camera.hpp"
+#include "render/coastlines.hpp"
+#include "render/font.hpp"
 #include "render/gl_context.hpp"
 #include "render/renderer.hpp"
 
@@ -241,6 +246,7 @@ struct InputState {
   double cursor_x = 0.0, cursor_y = 0.0;
   double press_x = 0.0, press_y = 0.0;
   bool left_down = false;
+  bool pressed = false;  // a left press since the last frame
   bool pan_down = false;
   double drag_travel = 0.0;
   float orbit_dx = 0.0f, orbit_dy = 0.0f;
@@ -249,6 +255,7 @@ struct InputState {
   bool click = false;
   double click_x = 0.0, click_y = 0.0;
   std::array<int, 32> keys{};
+  std::array<int, 32> mods{};
   unsigned key_count = 0;
 };
 
@@ -263,6 +270,7 @@ void install_callbacks(GLFWwindow* w, InputState* in) {
     if (button == GLFW_MOUSE_BUTTON_LEFT) {
       if (action == GLFW_PRESS) {
         s->left_down = true;
+        s->pressed = true;
         s->press_x = x;
         s->press_y = y;
         s->drag_travel = 0.0;
@@ -297,9 +305,14 @@ void install_callbacks(GLFWwindow* w, InputState* in) {
   glfwSetScrollCallback(w, [](GLFWwindow* win, double, double yoff) {
     input_of(win)->scroll += static_cast<float>(yoff);
   });
-  glfwSetKeyCallback(w, [](GLFWwindow* win, int key, int, int action, int) {
+  glfwSetKeyCallback(w, [](GLFWwindow* win, int key, int, int action, int mods) {
     InputState* s = input_of(win);
-    if (action == GLFW_PRESS && s->key_count < s->keys.size()) s->keys[s->key_count++] = key;
+    // Arrow keys repeat (timeline stepping); everything else acts on press.
+    const bool arrow = key == GLFW_KEY_LEFT || key == GLFW_KEY_RIGHT;
+    if ((action == GLFW_PRESS || (arrow && action == GLFW_REPEAT)) && s->key_count < s->keys.size()) {
+      s->mods[s->key_count] = mods;
+      s->keys[s->key_count++] = key;
+    }
   });
   double x = 0, y = 0;
   glfwGetCursorPos(w, &x, &y);
@@ -323,17 +336,21 @@ float wrap_time(float t, float period) {
 class Viewer {
  public:
   Viewer(const CliOptions& cli, const RenderSettings& rs, const std::string& shaderDir, const Graph& graph,
-         const HubTaxonomy& tax, const WhaleSet& whales, const IngestResult& ingest, LayoutEngine& engine,
-         std::string inputName)
+         const HubTaxonomy& tax, const WhaleSet& whales, const CoastlineSet& coast, const IngestResult& ingest,
+         LayoutEngine& engine, LiveSession* live, std::string inputName)
       : cli_(cli),
         rs_(rs),
         shader_dir_(shaderDir),
         graph_(graph),
         tax_(tax),
         whales_(whales),
+        coast_(coast),
         engine_(engine),
+        live_(live),
         title_("ftviz - " + inputName),
-        hud_stats_(graph, tax, ingest, inputName) {}
+        hud_stats_(graph, tax, ingest, inputName),
+        live_hud_(tax, live ? live->mode() : ModelMode::Dataset, live ? live->feeds() : nullptr,
+                  live ? &live->config() : nullptr) {}
 
   int run();
 
@@ -341,10 +358,15 @@ class Viewer {
   bool create_gpu_side();
   void destroy_gpu_side();
   void handle_input(int fbw, int fbh);
-  void handle_key(int key);
+  void handle_key(int key, int mods);
   void frame_selection();
-  void fly_to_hub(std::size_t hub);
+  void fly_to_preset(int index);
   void overview();
+  void set_paused(bool paused);
+  void seek_relative(std::int64_t deltaMs);
+  void seek_to_cursor(const LiveHudLayout& l, double fbX);
+  void request_export();
+  void refresh_live_hud();
   void print_frame_summary() const;
 
   const CliOptions& cli_;
@@ -353,7 +375,9 @@ class Viewer {
   const Graph& graph_;
   const HubTaxonomy& tax_;
   const WhaleSet& whales_;
+  const CoastlineSet& coast_;
   LayoutEngine& engine_;
+  LiveSession* live_;
   std::string title_;
 
   GlWindow window_;
@@ -361,6 +385,23 @@ class Viewer {
   InputState input_;
   OrbitCamera camera_;
   HudStats hud_stats_;
+  LiveHud live_hud_;
+  LiveHudLayout live_layout_;
+  LiveHudInput live_in_;
+  FixedText<512> toast_;
+  double toast_left_ms_ = 0.0;
+  std::uint64_t export_seen_ = 0;
+  bool export_pending_exit_ = false;
+  int hovered_hub_ = -1;
+  int pinned_hub_ = -1;
+  bool live_hud_dirty_ = true;
+  bool paused_ = false;       // Space: ingest application, layout and clocks
+  bool scrubbing_ = false;
+  bool flying_ = false;       // 1-5 preset flight in progress
+  float fly_t_ = 0.0f;
+  CameraPose fly_from_, fly_to_;
+  float live_clock_ = 0.0f;
+  glm::mat4 inv_view_proj_{1.0f};
   FrameStats frame_stats_;
   bool show_hud_ = true;
   bool inter_detail_ = true;
@@ -381,7 +422,7 @@ bool Viewer::create_gpu_side() {
   gladSetGLPostCallback(&gl_post_call_hook);
 #endif
   install_callbacks(window_.handle(), &input_);
-  renderer_ = std::make_unique<Renderer>(graph_, tax_, whales_, rs_, window_.caps(), shader_dir_);
+  renderer_ = std::make_unique<Renderer>(graph_, tax_, whales_, coast_, rs_, window_.caps(), shader_dir_);
   if (!renderer_->init(err)) {
     FTV_LOG_ERROR("renderer initialisation failed:\n%s", err.c_str());
     return false;
@@ -405,11 +446,55 @@ void Viewer::overview() {
   camera_.fly_to(glm::vec3(0.0f), rs_.camera_start_distance);
 }
 
-void Viewer::fly_to_hub(std::size_t hub) {
-  if (hub >= tax_.size()) return;
-  const ViewSetup v = hub_view(tax_.hubs()[hub], rs_);  // allocation free (runs inside the frame body)
-  camera_.fly_to(v.target, v.distance);
-  camera_.orbit_to(v.yaw, v.pitch);
+// Keys 1-5: an eased 1.2 s flight (direction slerp) to a view preset.
+void Viewer::fly_to_preset(int index) {
+  fly_from_ = CameraPose{camera_.target(), camera_.distance(), camera_.yaw(), camera_.pitch()};
+  fly_to_ = view_preset(index, tax_, rs_);
+  fly_t_ = 0.0f;
+  flying_ = true;
+}
+
+void Viewer::set_paused(bool paused) {
+  paused_ = paused;
+  replay_paused_ = paused;
+  engine_.set_paused(paused);
+  if (live_) live_->model().set_paused(paused);
+  live_hud_dirty_ = true;
+}
+
+void Viewer::seek_relative(std::int64_t deltaMs) {
+  if (!live_ || live_->mode() != ModelMode::Replay) return;
+  const std::int64_t D = live_->model().timeline_duration_ms();
+  if (D <= 0) return;
+  live_->model().request_seek(std::clamp<std::int64_t>(live_->model().timeline_ms() + deltaMs, 0, D - 1));
+  live_hud_dirty_ = true;
+}
+
+void Viewer::seek_to_cursor(const LiveHudLayout& l, double fbX) {
+  if (!live_ || live_->mode() != ModelMode::Replay || l.timeline.w <= 0.0f) return;
+  const std::int64_t D = live_->model().timeline_duration_ms();
+  const double f = std::clamp((fbX - static_cast<double>(l.timeline.x)) / static_cast<double>(l.timeline.w), 0.0, 1.0);
+  live_->model().request_seek(std::min<std::int64_t>(static_cast<std::int64_t>(f * static_cast<double>(D)), D - 1));
+  live_hud_dirty_ = true;
+}
+
+void Viewer::request_export() {
+  if (live_) live_->exporter().request();
+}
+
+void Viewer::refresh_live_hud() {
+  if (!live_) return;
+  ModelThread& m = live_->model();
+  live_in_.pinned_hub = pinned_hub_;
+  live_in_.timeline_visible = live_->mode() == ModelMode::Replay;
+  live_in_.timeline_pos_s = static_cast<double>(m.timeline_ms()) / 1000.0;
+  live_in_.timeline_len_s = static_cast<double>(m.timeline_duration_ms()) / 1000.0;
+  live_in_.capture_synthetic = live_->capture() && live_->capture()->synthetic();
+  live_in_.paused = paused_;
+  if (const LiveSnapshot* snap = m.snapshots().acquire()) {
+    live_hud_.refresh(*snap, live_in_);
+    m.snapshots().release(snap);
+  }
 }
 
 void Viewer::frame_selection() {
@@ -428,20 +513,27 @@ void Viewer::frame_selection() {
   camera_.fly_to(c, extent / std::sin(camera_.fov_y() * 0.5f) * 1.1f);
 }
 
-void Viewer::handle_key(int key) {
-  if (key >= GLFW_KEY_1 && key <= GLFW_KEY_9) {
-    fly_to_hub(static_cast<std::size_t>(key - GLFW_KEY_1));
+void Viewer::handle_key(int key, int mods) {
+  if (key >= GLFW_KEY_1 && key <= GLFW_KEY_5) {
+    fly_to_preset(key - GLFW_KEY_1 + 1);
     return;
   }
   switch (key) {
-    case GLFW_KEY_0:
-      overview();
-      break;
     case GLFW_KEY_F:
+      flying_ = false;
       frame_selection();
       break;
     case GLFW_KEY_E:
+      request_export();
+      break;
+    case GLFW_KEY_D:
       inter_detail_ = !inter_detail_;
+      break;
+    case GLFW_KEY_LEFT:
+      seek_relative((mods & GLFW_MOD_SHIFT) ? -10000 : -1000);
+      break;
+    case GLFW_KEY_RIGHT:
+      seek_relative((mods & GLFW_MOD_SHIFT) ? 10000 : 1000);
       break;
     case GLFW_KEY_L:
       engine_.set_paused(!engine_.paused());
@@ -453,10 +545,13 @@ void Viewer::handle_key(int key) {
       show_hud_ = !show_hud_;
       break;
     case GLFW_KEY_SPACE:
-      replay_paused_ = !replay_paused_;
+      set_paused(!paused_);
       break;
     case GLFW_KEY_ESCAPE:
-      if (renderer_->selection()) {
+      if (pinned_hub_ >= 0) {
+        pinned_hub_ = -1;
+        live_hud_dirty_ = true;
+      } else if (renderer_->selection()) {
         renderer_->set_selection(std::nullopt);
         selection_changed_ = true;
       } else {
@@ -475,24 +570,72 @@ void Viewer::handle_input(int fbw, int fbh) {
   ww = std::max(ww, 1);
   wh = std::max(wh, 1);
 
-  for (unsigned i = 0; i < input_.key_count; ++i) handle_key(input_.keys[i]);
+  for (unsigned i = 0; i < input_.key_count; ++i) handle_key(input_.keys[i], input_.mods[i]);
   input_.key_count = 0;
 
+  // Cursor coordinates are in window units; HUD and pick targets are in pixels.
+  const double sx = static_cast<double>(fbw) / ww, sy = static_cast<double>(fbh) / wh;
+  const double cx = input_.cursor_x * sx, cy = input_.cursor_y * sy;
+  const bool overButton = live_ && show_hud_ && live_layout_.export_button.contains(cx, cy);
+  const bool timelineOn = live_ && show_hud_ && live_->mode() == ModelMode::Replay;
+  if (live_in_.export_hover != overButton) live_in_.export_hover = overButton;
+
+  // Dragging that started on the timeline scrubs instead of orbiting.
+  if (input_.pressed) {
+    input_.pressed = false;
+    scrubbing_ = timelineOn && live_layout_.timeline.contains(input_.press_x * sx, input_.press_y * sy);
+  } else if (scrubbing_ && !input_.left_down && !input_.click) {
+    scrubbing_ = false;
+  }
+  if (scrubbing_) {
+    seek_to_cursor(live_layout_, cx);
+    input_.orbit_dx = input_.orbit_dy = 0.0f;
+  }
+
   if (input_.orbit_dx != 0.0f || input_.orbit_dy != 0.0f) {
+    flying_ = false;
     camera_.orbit(-input_.orbit_dx * 0.005f, input_.orbit_dy * 0.005f);
   }
   if (input_.pan_dx != 0.0f || input_.pan_dy != 0.0f) {
+    flying_ = false;
     camera_.pan(input_.pan_dx / static_cast<float>(wh), input_.pan_dy / static_cast<float>(wh));
   }
-  if (input_.scroll != 0.0f) camera_.zoom(input_.scroll);
+  if (input_.scroll != 0.0f) {
+    flying_ = false;
+    camera_.zoom(input_.scroll);
+  }
   input_.orbit_dx = input_.orbit_dy = input_.pan_dx = input_.pan_dy = input_.scroll = 0.0f;
+
+  // Hub hover: CPU ray-sphere test against the hub markers (last frame's camera).
+  int hover = -1;
+  if (!input_.left_down && !input_.pan_down && !overButton) {
+    const Ray ray = pixel_ray(camera_.position(), inv_view_proj_, static_cast<float>(cx), static_cast<float>(cy),
+                              static_cast<float>(fbw), static_cast<float>(fbh));
+    hover = pick_hub(ray, tax_, rs_.globe.radius);
+  }
+  hovered_hub_ = hover;
 
   if (input_.click) {
     input_.click = false;
-    // Cursor coordinates are in window units; the pick target is in pixels.
-    const int px = static_cast<int>(input_.click_x * static_cast<double>(fbw) / ww);
-    const int py = static_cast<int>(input_.click_y * static_cast<double>(fbh) / wh);
-    renderer_->request_pick(px, py);
+    const double px = input_.click_x * sx, py = input_.click_y * sy;
+    if (scrubbing_) {
+      scrubbing_ = false;  // the release that ends a scrub (already applied above)
+    } else if (live_ && show_hud_ && live_layout_.export_button.contains(px, py)) {
+      request_export();
+    } else if (timelineOn && live_layout_.timeline.contains(px, py)) {
+      seek_to_cursor(live_layout_, px);
+    } else {
+      const Ray ray = pixel_ray(camera_.position(), inv_view_proj_, static_cast<float>(px), static_cast<float>(py),
+                                static_cast<float>(fbw), static_cast<float>(fbh));
+      const int hub = pick_hub(ray, tax_, rs_.globe.radius);
+      if (hub >= 0 && live_) {
+        pinned_hub_ = pinned_hub_ == hub ? -1 : hub;  // click again to unpin
+        live_hud_dirty_ = true;
+      } else {
+        // Nodes keep the GPU id buffer (R32UI) pick.
+        renderer_->request_pick(static_cast<int>(px), static_cast<int>(py));
+      }
+    }
   }
 }
 
@@ -568,6 +711,12 @@ int Viewer::run() {
   }
   inter_detail_ = cli_.inter_detail;
   show_hud_ = cli_.show_hud;
+  if (!cli_.pin_hub.empty()) {
+    if (const auto h = tax_.find(cli_.pin_hub)) pinned_hub_ = static_cast<int>(*h);
+  }
+  if (live_) export_seen_ = live_->exporter().completed();
+  double sinceStartMs = 0.0;
+  bool exportAfterDone = cli_.export_after < 0.0f;
   if (cli_.select_node >= 0 && static_cast<std::size_t>(cli_.select_node) < graph_.node_count()) {
     renderer_->set_selection(static_cast<std::uint32_t>(cli_.select_node));
     frame_selection();
@@ -612,15 +761,62 @@ int Viewer::run() {
     const auto dt = static_cast<float>(std::min(dtMs, 250.0) / 1000.0);
     if (!replay_paused_) replayTime = wrap_time(replayTime + dt, rs_.replay_seconds);
     frameEma += (dtMs - frameEma) * 0.08;
+    sinceStartMs += dtMs;
 
     Stopwatch cpu;
+    live_layout_ = LiveHud::layout(fbw, fbh, hud_stats_.left_bottom(fbh));
     handle_input(fbw, fbh);
     std::optional<std::uint32_t> picked;
     if (renderer_->poll_pick(picked)) {
       renderer_->set_selection(picked);
       selection_changed_ = true;
     }
+    if (flying_) {
+      fly_t_ += dt / kPresetFlightSeconds;
+      const CameraPose pose = ease_pose(fly_from_, fly_to_, fly_t_);
+      camera_.set_immediate(pose.target, pose.distance, pose.yaw, pose.pitch);
+      if (fly_t_ >= 1.0f) flying_ = false;
+    }
     camera_.update(dt);
+
+    // Live layer: clocks, whale arcs from the model thread, export results.
+    if (live_) {
+      ModelThread& model = live_->model();
+      if (!paused_) live_clock_ += dt;
+      if (live_->mode() == ModelMode::Replay) {
+        // The live arc clock follows the replay timeline (also across seeks).
+        const float pos = static_cast<float>(model.position_ms()) * 1e-3f;
+        if (std::fabs(pos - live_clock_) > 0.15f) live_clock_ = pos;
+      }
+      live_->pump_visuals(*renderer_, live_clock_);
+      if (!exportAfterDone && sinceStartMs >= static_cast<double>(cli_.export_after) * 1000.0) {
+        exportAfterDone = true;
+        export_pending_exit_ = true;
+        request_export();
+      }
+      const std::uint64_t done = live_->exporter().completed();
+      if (done != export_seen_) {
+        export_seen_ = done;
+        char text[512];
+        bool ok = false;
+        live_->exporter().last_result(text, sizeof text, ok);
+        toast_.clear();
+        for (const char* c = text; *c; ++c) {
+          if (c[0] == '-' && c[1] == '>') {
+            toast_.ch(kGlyphArrow);
+            ++c;
+          } else {
+            toast_.ch(*c);
+          }
+        }
+        toast_left_ms_ = 3000.0;
+        live_in_.toast_ok = ok;
+        std::printf("[export] %s\n", text);
+        if (export_pending_exit_) glfwSetWindowShouldClose(window_.handle(), GLFW_TRUE);
+      }
+      toast_left_ms_ = std::max(0.0, toast_left_ms_ - dtMs);
+      live_in_.toast = toast_left_ms_ > 0.0 ? toast_.view() : std::string_view();
+    }
 
     renderer_->begin_frame(engine_.snapshots());
 
@@ -632,14 +828,22 @@ int Viewer::run() {
         frame_stats_.cpu_ms = cpuEma;
         frame_stats_.cpu_peak_ms = cpuPeak;
         frame_stats_.inter_detail = inter_detail_;
-        frame_stats_.replay_paused = replay_paused_;
+        frame_stats_.replay_paused = paused_;
         frame_stats_.replay_time = replayTime;
         hud_stats_.refresh(frame_stats_, *renderer_, engine_.status(), renderer_->selection());
         sinceHudRefresh = 0.0;
         cpuPeak = 0.0;
         selection_changed_ = false;
+        live_hud_dirty_ = true;
       }
       hud_stats_.emit(renderer_->hud(), fbw, fbh);
+      if (live_) {
+        if (live_hud_dirty_) {
+          refresh_live_hud();  // 4 Hz, and at once when the pin, pause or timeline changes
+          live_hud_dirty_ = false;
+        }
+        live_hud_.emit(renderer_->hud(), live_layout_, live_in_);
+      }
     }
 
     FrameParams p;
@@ -653,6 +857,10 @@ int Viewer::run() {
     p.height = fbh;
     p.inter_detail = inter_detail_;
     p.show_hud = show_hud_;
+    p.live_time = live_clock_;
+    p.hovered_hub = hovered_hub_;
+    p.pinned_hub = pinned_hub_;
+    inv_view_proj_ = glm::inverse(p.proj * p.view);
     renderer_->draw_frame(p);
 
     const double cpuMs = std::max(0.0, cpu.millis() - static_cast<double>(renderer_->counters().fence_wait_ms));
@@ -687,6 +895,12 @@ int Viewer::run() {
   }
 
   if (frameLimit) print_frame_summary();
+  if (live_) {
+    live_->print_feed_report();
+    if (frame_stats_.alloc_counting) {
+      std::printf("[model] allocations on the model thread while ticking: %" PRIu64 "\n", live_->model().allocations());
+    }
+  }
   destroy_gpu_side();
   return 0;
 }
@@ -696,7 +910,8 @@ int Viewer::run() {
 // ---------------------------------------------------------------------------
 
 int render_screenshot(const CliOptions& cli, const RenderSettings& rs, const std::string& shaderDir,
-                      const Graph& graph, const HubTaxonomy& tax, const WhaleSet& whales, LayoutEngine& engine) {
+                      const Graph& graph, const HubTaxonomy& tax, const WhaleSet& whales, const CoastlineSet& coast,
+                      LayoutEngine& engine, LiveSession* live) {
   GlWindow ctx;
   std::string err;
   if (!ctx.create_offscreen(cli.gl_debug, err)) {
@@ -705,7 +920,7 @@ int render_screenshot(const CliOptions& cli, const RenderSettings& rs, const std
   }
   int code = 0;
   {
-    Renderer renderer(graph, tax, whales, rs, ctx.caps(), shaderDir);
+    Renderer renderer(graph, tax, whales, coast, rs, ctx.caps(), shaderDir);
     if (!renderer.init(err)) {
       FTV_LOG_ERROR("renderer initialisation failed:\n%s", err.c_str());
       return 1;
@@ -730,18 +945,46 @@ int render_screenshot(const CliOptions& cli, const RenderSettings& rs, const std
     const int w = rs.window_width, h = rs.window_height;
     const float aspect = static_cast<float>(w) / static_cast<float>(h);
     Stopwatch sw;
+    // The live layer is stepped synchronously (no threads) in fixed 100 ms
+    // steps up to the capture time, so the model state, the live whale arcs
+    // and the HUD text are the same on every run.
+    LiveHud liveHud(tax, live ? live->mode() : ModelMode::Dataset, nullptr, live ? &live->config() : nullptr);
+    LiveHudInput hudIn;
+    if (live) {
+      const auto targetMs = static_cast<std::int64_t>(std::llround(static_cast<double>(target) * 1000.0));
+      for (std::int64_t t = 0; t < targetMs; t += 100) {
+        live->model().step(std::min<std::int64_t>(100, targetMs - t));
+        live->pump_visuals(renderer, target);
+      }
+      if (!cli.pin_hub.empty()) {
+        if (const auto hub = tax.find(cli.pin_hub)) hudIn.pinned_hub = static_cast<int>(*hub);
+      }
+      hudIn.timeline_visible = live->mode() == ModelMode::Replay;
+      hudIn.timeline_pos_s = static_cast<double>(live->model().timeline_ms()) / 1000.0;
+      hudIn.timeline_len_s = static_cast<double>(live->model().timeline_duration_ms()) / 1000.0;
+      hudIn.capture_synthetic = live->capture() && live->capture()->synthetic();
+      if (const LiveSnapshot* snap = live->model().snapshots().acquire()) {
+        liveHud.refresh(*snap, hudIn);
+        live->model().snapshots().release(snap);
+      }
+    }
+    const bool overlay = cli.overlay && live;
+    const LiveHudLayout hudLayout = LiveHud::layout(w, h, 10.0f * HudStats::text_scale(h));
     for (unsigned f = 0; f <= warm; ++f) {
       renderer.begin_frame(engine.snapshots());
+      if (overlay) liveHud.emit(renderer.hud(), hudLayout, hudIn);
       FrameParams p;
       p.view = camera.view();
       p.proj = camera.projection(aspect);
       p.camera_pos = camera.position();
       p.time = target - static_cast<float>(warm - f) / 60.0f;
+      p.live_time = p.time;
+      p.pinned_hub = hudIn.pinned_hub;
       p.near_plane = camera.near_plane();
       p.width = w;
       p.height = h;
       p.inter_detail = cli.inter_detail;
-      p.show_hud = false;
+      p.show_hud = overlay;
       p.present = false;
       renderer.draw_frame(p);
     }
@@ -777,6 +1020,8 @@ int run_application(const CliOptions& cli, const std::string& exeDir) {
   const std::string renderPath = resolve_path(cli.render_path, exeDir, "config/render.json");
   const std::string themePath = resolve_path(cli.theme_path, exeDir, "config/theme.json");
   const std::string shaderDir = resolve_path(cli.shader_dir, exeDir, "shaders");
+  const std::string feedsPath = resolve_path(cli.feeds_path, exeDir, "config/feeds.json");
+  const std::string assetsDir = resolve_path(std::string(), exeDir, "assets");
 
   auto taxonomy = HubTaxonomy::load(hubsPath, err);
   if (!taxonomy) {
@@ -854,22 +1099,54 @@ int run_application(const CliOptions& cli, const std::string& exeDir) {
 
   const IterationStats pre = run_layout_iterations(solver, cli.prelayout, false, "prelayout", nullptr);
 
+  // ---- coastlines and the live layer ------------------------------------------------
+  CoastlineSet coast;
+  if (!load_coastlines(assetsDir, coast, err)) {
+    FTV_LOG_ERROR("coastlines: %s", err.c_str());
+    return 1;
+  }
+  std::printf("[assets] coastlines: %zu segments (110m)%s, Natural Earth, public domain\n", coast.coarse_count,
+              coast.fine_count ? " + 50m close-zoom set" : "");
+  LiveSessionOptions lo;
+  lo.mode = cli.live ? ModelMode::Live : cli.replay ? ModelMode::Replay : ModelMode::Dataset;
+  lo.feeds_path = feedsPath;
+  lo.capture_path = cli.replay_path;
+  lo.base_dir = fs::path(feedsPath).parent_path().parent_path().string();
+  lo.export_dir = cli.export_dir;
+  std::unique_ptr<LiveSession> live = LiveSession::create(lo, *taxonomy, err);
+  if (!live) {
+    if (lo.mode != ModelMode::Dataset) {
+      FTV_LOG_ERROR("live layer: %s", err.c_str());
+      return 1;
+    }
+    FTV_LOG_WARN("live layer disabled (modeled corridors, hub panel and export unavailable): %s", err.c_str());
+  } else {
+    std::printf("[live] mode %s, feeds %s\n", kModelModeNames[static_cast<std::size_t>(lo.mode)], feedsPath.c_str());
+  }
+
   LayoutEngine engine(solver, graph.node_count());
   // With a prelayout, its last iteration seeds the HUD timings.
   engine.publish_now(cli.prelayout > 0 ? &pre : nullptr);
   if (!cli.screenshot.empty()) {
     // Screenshots capture the pre-laid-out state exactly (layout thread never starts).
-    return render_screenshot(cli, rs, shaderDir, graph, *taxonomy, whales, engine);
+    return render_screenshot(cli, rs, shaderDir, graph, *taxonomy, whales, coast, engine, live.get());
   }
   if (cli.start_paused) engine.set_paused(true);
   engine.start();
+  if (live) {
+#if defined(FTVIZ_COUNT_ALLOCATIONS)
+    live->model().set_alloc_counter(&thread_allocation_count);
+#endif
+    live->start();
+  }
 
   const std::string inputName = fs::path(cli.input).filename().string();
   int code = 0;
   {
-    Viewer viewer(cli, rs, shaderDir, graph, *taxonomy, whales, ingest, engine, inputName);
+    Viewer viewer(cli, rs, shaderDir, graph, *taxonomy, whales, coast, ingest, engine, live.get(), inputName);
     code = viewer.run();
   }
+  if (live) live->stop();
   engine.stop();
   return code;
 }

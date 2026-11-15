@@ -53,6 +53,8 @@ class HudStats {
   void emit(HudRenderer& hud, int width, int height) const noexcept;
 
   static float text_scale(int height) noexcept;
+  // y (px) just below the statistics and selection blocks on the left.
+  [[nodiscard]] float left_bottom(int height) const noexcept;
 
  private:
   static constexpr std::size_t kSegLen = 112;
@@ -87,7 +89,7 @@ class HudStats {
   Block stats_;     // top-left
   Block select_;    // below the stats block
   Block help_;      // bottom-left
-  Block legend_;    // top-right
+  Block legend_;    // bottom-right
   std::size_t legend_count_ = 0;
 
   // Static lines prepared at construction (dataset facts never change).
