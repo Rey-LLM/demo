@@ -173,4 +173,6 @@ bool split_pair(std::string_view symbol, Asset& base, Asset& quote) noexcept;  /
 bool split_concat_pair(std::string_view symbol, Asset& base, Asset& quote) noexcept;  // "BTCUSDT", "ethusdt"
 bool asset_from_code(std::string_view code, Asset& out) noexcept;
 
+// Hash of a source id (tx hash, trade id) as stored in LiveEvent::id_hash (FNV-1a 64).
+std::uint64_t source_id_hash(std::string_view id) noexcept;
 }  // namespace ftv

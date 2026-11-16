@@ -116,6 +116,12 @@ CameraPose view_preset(int index, const HubTaxonomy& taxonomy, const RenderSetti
   }
 }
 
+CameraPose hub_pose(const HubDef& hub, const RenderSettings& rs) noexcept {
+  const float R = rs.globe.radius;
+  const bool fiat = hub.type == HubType::FiatCenter;
+  return region(hub.lat_deg - (fiat ? 6.0f : 0.0f), hub.lon_deg, R * (fiat ? 2.3f : 2.8f));
+}
+
 CameraPose ease_pose(const CameraPose& a, const CameraPose& b, float t) noexcept {
   if (t <= 0.0f) return a;
   if (t >= 1.0f) return b;

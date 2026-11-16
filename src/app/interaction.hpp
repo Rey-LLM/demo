@@ -44,6 +44,9 @@ CameraPose view_preset(int index, const HubTaxonomy& taxonomy, const RenderSetti
 // Pose at parameter t in [0, 1] of the flight a -> b: cubic ease in/out, the
 // viewing direction slerped on the unit sphere, target and distance blended.
 // t <= 0 returns a and t >= 1 returns b exactly.
+// Close view of one hub (search fly-to), looking down on it from slightly south.
+CameraPose hub_pose(const HubDef& hub, const RenderSettings& settings) noexcept;
+
 CameraPose ease_pose(const CameraPose& a, const CameraPose& b, float t) noexcept;
 
 inline constexpr float kPresetFlightSeconds = 1.2f;

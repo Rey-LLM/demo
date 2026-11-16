@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -98,6 +99,80 @@ struct Session {
     in.whale_count = whales.size();
     in.volumes = volumes.data();
     in.volume_count = volumes.size();
+
+    // v4: tape, filters, sun, sessions, pools, rotations.
+    TapeEntry trade;
+    trade.ts_ms = t0 + 1500;
+    trade.usd_value = 2600000.0;
+    trade.amount = 41.25;
+    trade.price = 63030.303;
+    trade.feed = FeedId::Okx;
+    trade.kind = EventKind::Trade;
+    trade.asset = Asset::BTC;
+    trade.quote_code = static_cast<std::uint8_t>(static_cast<unsigned>(Asset::USDT) + 1u);
+    trade.tier = 3;
+    trade.flags = kEvBuy;
+    trade.src_hub = 0;
+    trade.dst_hub = 1;
+    TapeEntry liq = trade;
+    liq.ts_ms = t0 + 2100;
+    liq.usd_value = 41000.0;
+    liq.amount = 0.65;
+    liq.feed = FeedId::BinanceLiq;
+    liq.kind = EventKind::Liquidation;
+    liq.tier = 0;
+    liq.flags = 0;  // a sell order: a LONG was liquidated
+    liq.label = SourceLabel::Replay;
+    TapeEntry tx;
+    tx.ts_ms = t0 + 9001;
+    tx.usd_value = 310000.55;
+    tx.amount = 98.5;
+    tx.price = 3147.21;
+    tx.feed = FeedId::Eth;
+    tx.kind = EventKind::Transaction;
+    tx.asset = Asset::ETH;
+    tx.tier = 1;
+    tx.src_hub = 2;
+    tx.dst_hub = 2;
+    std::memcpy(tx.from_tag, "3fa1", 4);
+    std::memcpy(tx.to_tag, "9c07", 4);
+    tx.label = SourceLabel::Delayed;
+    in.tape = {trade, liq, tx};
+    in.filters.min_usd = 1e7;
+    in.filters.min_tier = 2;
+    in.filters.venues = {"OKX"};
+    in.sun_ms = t0;
+    in.sun_fixed = true;
+    in.subsolar_lat = -18.4567;
+    in.subsolar_lon = 109.8765;
+    ExportSession lse;
+    lse.id = "LSE";
+    lse.city = "LONDON";
+    lse.tz = "Europe/London";
+    lse.state = "CLOSED";
+    lse.next_state = "PRE";
+    lse.next_change_ms = t0 + 3 * 3600000 + 10 * 60000;
+    lse.source = "https://www.londonstockexchange.com/";
+    lse.as_of = "2026-11-15";
+    in.sessions = {lse};
+    ExportPool eth;
+    eth.feed = "ETH";
+    ExportEndpoint a;
+    a.url = "wss://a.example/eth";
+    a.rpc_url = "https://a.example/eth";
+    a.max_rps = 5.0;
+    a.limit = "10 req/s per IP";
+    a.limit_source = "https://a.example/docs";
+    a.as_of = "2026-11-15";
+    a.active = true;
+    ExportEndpoint b = a;
+    b.url = "wss://b.example/eth";
+    b.rpc_url.clear();
+    b.max_rps = 1.0;
+    b.active = false;
+    eth.endpoints = {a, b};
+    in.pools = {eth};
+    in.rotations = {{t0 + 700, "ETH", 0, 1, "rate_limited"}};
   }
 };
 
@@ -165,7 +240,8 @@ TEST_CASE("export: files match the golden files byte for byte") {
   const std::pair<const char*, std::string> files[] = {
       {"session.json", export_session_json(s.in)},     {"hub_flows.csv", export_hub_flows_csv(s.in)},
       {"hub_flows.json", export_hub_flows_json(s.in)}, {"whales.csv", export_whales_csv(s.in)},
-      {"volume_tps.csv", export_volume_csv(s.in)},
+      {"volume_tps.csv", export_volume_csv(s.in)},     {"tape.csv", export_tape_csv(s.in)},
+      {"liquidations.csv", export_liquidations_csv(s.in)},
   };
   for (const auto& [name, text] : files) {
     const std::string want = slurp(golden / name);
@@ -177,6 +253,39 @@ TEST_CASE("export: files match the golden files byte for byte") {
     CHECK(!want.empty());
     CHECK(want == text);
   }
+}
+
+TEST_CASE("export: tape and liquidation CSVs parse back with labels, sides and tags") {
+  Session s;
+  bool crlf = false;
+  const auto tape = read_csv(export_tape_csv(s.in), crlf);
+  CHECK(crlf);
+  REQUIRE(tape.size() == 4);
+  for (const auto& r : tape) CHECK_EQ(r.size(), 15u);
+  CHECK_EQ(tape[1][1], std::string("OKX"));
+  CHECK_EQ(tape[1][5], std::string("BUY"));
+  CHECK_EQ(tape[2][2], std::string("LIQUIDATION"));
+  CHECK_EQ(tape[2][5], std::string("LONG"));
+  CHECK_EQ(tape[2][14], std::string("REPLAY"));
+  CHECK_EQ(tape[3][10], std::string("OFF\"SHORE, X"));
+  CHECK_EQ(tape[3][12], std::string("3fa1"));
+  CHECK_EQ(tape[3][14], std::string("DELAYED"));
+  const auto liq = read_csv(export_liquidations_csv(s.in), crlf);
+  CHECK(crlf);
+  REQUIRE(liq.size() == 2);
+  CHECK_EQ(liq[1][4], std::string("LONG"));
+  CHECK(std::stod(liq[1][5]) == 41000.0);
+  // session.json is valid JSON and carries the v4 sections.
+  std::string perr;
+  const auto root = parse_json(export_session_json(s.in), perr);
+  REQUIRE(root.has_value());
+  const JsonValue* f = root->find("filters");
+  REQUIRE(f != nullptr);
+  CHECK(f->number_or("min_usd", 0.0) == 1e7);
+  CHECK(root->find("sun") != nullptr && root->find("sun")->string_or("source", "") == "--sun-time");
+  CHECK(root->find("trading_sessions") != nullptr && root->find("trading_sessions")->items().size() == 1);
+  CHECK(root->find("endpoint_pools") != nullptr && root->find("endpoint_pools")->items().size() == 1);
+  CHECK(root->find("endpoint_rotations") != nullptr && root->find("endpoint_rotations")->items().size() == 1);
 }
 
 TEST_CASE("export: CSV round trip (RFC 4180, CRLF, quoting, fixed decimals)") {
@@ -302,17 +411,20 @@ TEST_CASE("export: atomic write leaves no temporary file and replaces whole file
   fs::remove_all(dir, ec);
 }
 
-TEST_CASE("export: write_export creates the directory with all five files") {
+TEST_CASE("export: write_export creates the directory with all seven files") {
   Session s;
   const fs::path root = temp_dir("export");
   std::string out, err;
   REQUIRE(write_export(root.string(), s.in, out, err));
   CHECK_EQ(fs::path(out).filename().string(), std::string("ftviz_export_20261115T044012Z"));
-  for (const char* n : {"session.json", "hub_flows.csv", "hub_flows.json", "whales.csv", "volume_tps.csv"}) {
+  for (const char* n : {"session.json", "hub_flows.csv", "hub_flows.json", "whales.csv", "volume_tps.csv", "tape.csv",
+                        "liquidations.csv"}) {
     CHECK(fs::exists(fs::path(out) / n));
     CHECK(!fs::exists(fs::path(out) / (std::string(n) + ".tmp")));
   }
   CHECK_EQ(slurp(fs::path(out) / "whales.csv"), export_whales_csv(s.in));
+  CHECK_EQ(slurp(fs::path(out) / "tape.csv"), export_tape_csv(s.in));
+  CHECK_EQ(slurp(fs::path(out) / "liquidations.csv"), export_liquidations_csv(s.in));
   // A second export in the same second gets its own directory.
   std::string out2;
   REQUIRE(write_export(root.string(), s.in, out2, err));

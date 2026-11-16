@@ -5,6 +5,7 @@
 
 #include <array>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "export/exporter.hpp"
@@ -13,6 +14,7 @@
 #include "model/feed_config.hpp"
 #include "model/hub_taxonomy.hpp"
 #include "model/sessions.hpp"
+#include "ui/command_bar.hpp"
 
 namespace ftv {
 
@@ -46,10 +48,21 @@ class LiveSession {
   [[nodiscard]] const Capture* capture() const noexcept { return capture_loaded_ ? &capture_ : nullptr; }
   [[nodiscard]] const std::string& capture_path() const noexcept { return capture_path_; }
   ExportService& exporter() noexcept { return *exporter_; }
+  // What session.json records besides the model: the search filters and the
+  // sun time in effect on the render thread. Set right before request().
+  struct ExportContext {
+    TapeFilter filter;
+    std::int64_t sun_ms = 0;
+    bool sun_fixed = false;
+  };
+  void set_export_context(const ExportContext& c) noexcept {
+    std::lock_guard<std::mutex> lock(ctx_mu_);
+    ctx_ = c;
+  }
 
   // Render thread: moves pending VisualEvents into the renderer's live arc
   // slots (round robin over the fixed slots; never allocates).
-  void pump_visuals(Renderer& renderer, float liveClock) noexcept;
+  void pump_visuals(Renderer& renderer, float liveClock, const TapeFilter* filter = nullptr) noexcept;
   void set_arc_lifetime(float seconds) noexcept { whale_span_s_ = seconds; }
 
   // Prints one line per feed (state, label, counters) to stdout.
@@ -72,6 +85,8 @@ class LiveSession {
   std::unique_ptr<ExportService> exporter_;
   const LiveSnapshot* pinned_ = nullptr;  // exporter thread
   bool gate_held_ = false;
+  std::mutex ctx_mu_;
+  ExportContext ctx_;
   struct SlotState {
     float start = 0.0f;
     std::uint8_t tier = 0;

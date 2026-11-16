@@ -197,7 +197,7 @@ class ModelThread {
 
  private:
   void run(std::stop_token st);
-  void push_visual(const WhaleRecord& w, float startS) noexcept;
+  void push_visual(const WhaleRecord& w, bool liquidation, float startS) noexcept;
   // A flow trail for a non-whale hub-to-hub event (token bucket on the model clock).
   void maybe_trail(const LiveEvent& e, std::int64_t clockMs, float startS) noexcept;
   void step_live(std::int64_t nowMs) noexcept;

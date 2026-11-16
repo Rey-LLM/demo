@@ -83,12 +83,15 @@ void ModelThread::stop() {
   }
 }
 
-void ModelThread::push_visual(const WhaleRecord& w, float startS) noexcept {
+void ModelThread::push_visual(const WhaleRecord& w, bool liquidation, float startS) noexcept {
   VisualEvent v;
   v.start_s = startS;  // < 0: stamped with the render thread's live clock when it is popped
   v.src_hub = w.src_hub;
   v.dst_hub = w.dst_hub;
   v.tier = w.tier;
+  v.feed = w.feed;
+  v.liquidation = liquidation ? 1 : 0;
+  v.usd = static_cast<float>(w.usd_value);
   if (!visual_.try_push(v)) visual_drops_.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -106,7 +109,9 @@ void ModelThread::maybe_trail(const LiveEvent& e, std::int64_t clockMs, float st
   w.src_hub = e.src_hub;
   w.dst_hub = e.dst_hub;
   w.tier = 0;
-  push_visual(w, startS);
+  w.usd_value = e.usd_value;
+  w.feed = e.feed;
+  push_visual(w, false, startS);
 }
 
 void ModelThread::step_live(std::int64_t nowMs) noexcept {
@@ -128,7 +133,7 @@ void ModelThread::step_live(std::int64_t nowMs) noexcept {
     WhaleRecord w;
     for (int i = 0; i < 32768 && feeds_->events().try_pop(e); ++i) {
       if (model_.apply(e, nowMs, &w)) {
-        push_visual(w, -1.0f);
+        push_visual(w, e.kind == EventKind::Liquidation, -1.0f);
       } else {
         maybe_trail(e, nowMs, -1.0f);
       }
@@ -155,7 +160,7 @@ void ModelThread::step_live(std::int64_t nowMs) noexcept {
           e.ts_ms = nowMs;
           e.label = SourceLabel::Replay;
           if (model_.apply(e, nowMs, &w)) {
-            push_visual(w, -1.0f);
+            push_visual(w, e.kind == EventKind::Liquidation, -1.0f);
           } else {
             maybe_trail(e, nowMs, -1.0f);
           }
@@ -184,7 +189,7 @@ void ModelThread::step_replay(std::int64_t dtMs) noexcept {
   }
   driver_->advance_to(model_, driver_->position_ms() + dtMs, [this](const LiveEvent& e, const WhaleRecord* w, double relS) {
     if (w) {
-      push_visual(*w, static_cast<float>(relS));
+      push_visual(*w, e.kind == EventKind::Liquidation, static_cast<float>(relS));
     } else {
       maybe_trail(e, e.ts_ms, static_cast<float>(relS));
     }

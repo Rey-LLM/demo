@@ -103,7 +103,10 @@ struct VisualEvent {
   std::uint16_t src_hub = 0;
   std::uint16_t dst_hub = 0;
   std::uint8_t tier = 1;  // 1..3 whales; 0 a flow trail (below the whale threshold)
-  std::uint8_t pad[3] = {};
+  FeedId feed = FeedId::BtcMempool;  // for the tape / arc filter
+  std::uint8_t liquidation = 0;
+  std::uint8_t pad = 0;
+  float usd = 0.0f;
 };
 
 }  // namespace ftv

@@ -240,6 +240,8 @@ void value_in_usd(LiveEvent& e, const ParseContext& ctx) noexcept {
 
 }  // namespace
 
+std::uint64_t source_id_hash(std::string_view id) noexcept { return fnv1a(id); }
+
 // ---------------------------------------------------------------------------
 // blockchain.com: {"op":"utx","x":{... "time":..., "hash":"...", "out":[{"value":sat}, ...]}}
 // ---------------------------------------------------------------------------

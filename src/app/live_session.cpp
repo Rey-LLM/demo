@@ -7,6 +7,7 @@
 #include <thread>
 
 #include "core/embedded_fs.hpp"
+#include "model/solar.hpp"
 #include "core/log.hpp"
 #include "ingest/live/net.hpp"
 #include "render/renderer.hpp"
@@ -175,6 +176,81 @@ bool LiveSession::build_export(ExportInput& in) {
   in.whale_count = snap.whale_count;
   in.volumes = m.volumes();
   in.volume_count = snap.volume_count;
+
+  // Tape window [tape_first, tape_total) as published with the snapshot; the
+  // ring keeps a margin beyond the window, so these slots are not reused
+  // while the gate is held.
+  for (std::uint64_t i = snap.tape_first; i < snap.tape_total; ++i) in.tape.push_back(m.tape_at(i));
+
+  ExportContext ctx;
+  {
+    std::lock_guard<std::mutex> lock(ctx_mu_);
+    ctx = ctx_;
+  }
+  in.filters.min_usd = ctx.filter.min_usd;
+  in.filters.min_tier = ctx.filter.min_tier;
+  in.filters.liquidations_only = ctx.filter.liq_only;
+  for (std::size_t f = 0; f < kFeedCount; ++f) {
+    if (ctx.filter.feed_mask & (1u << f)) in.filters.venues.emplace_back(feed_name(static_cast<FeedId>(f)));
+  }
+  in.sun_ms = ctx.sun_ms;
+  in.sun_fixed = ctx.sun_fixed;
+  if (ctx.sun_ms != 0) {
+    const SubsolarPoint sp = subsolar_point(ctx.sun_ms);
+    in.subsolar_lat = sp.lat_deg;
+    in.subsolar_lon = sp.lon_deg;
+  }
+  if (sessions_) {
+    const std::int64_t now = snap.now_ms;
+    for (std::size_t e = 0; e < sessions_->size(); ++e) {
+      const ExchangeSession& ex = sessions_->exchange(e);
+      const SessionStatus st = sessions_->state(e, now);
+      ExportSession es;
+      es.id = ex.id;
+      es.city = ex.city;
+      es.tz = ex.tz;
+      es.state = kSessionStateNames[static_cast<std::size_t>(st.state) % 5];
+      es.next_state = kSessionStateNames[static_cast<std::size_t>(st.next_state) % 5];
+      es.next_change_ms = st.next_change_ms;
+      es.source = ex.source;
+      es.as_of = ex.as_of;
+      in.sessions.push_back(std::move(es));
+    }
+  }
+  for (std::size_t f = 0; f < kFeedCount; ++f) {
+    const FeedConfig& fc = config_.feeds[f];
+    if (fc.pool.empty() || !fc.enabled) continue;
+    ExportPool p;
+    p.feed = std::string(feed_name(static_cast<FeedId>(f)));
+    const std::size_t active =
+        feeds_ ? feeds_->status(static_cast<FeedId>(f)).url_index.load(std::memory_order_relaxed) : 0;
+    for (std::size_t k = 0; k < fc.pool.size(); ++k) {
+      const EndpointConfig& ep = fc.pool[k];
+      ExportEndpoint ee;
+      ee.url = ep.url;
+      ee.rpc_url = ep.rpc_url;
+      ee.limit = ep.limit_note;
+      ee.limit_source = ep.limit_source;
+      ee.as_of = ep.as_of;
+      ee.max_rps = ep.max_rps;
+      ee.active = feeds_ != nullptr && k == active;
+      p.endpoints.push_back(std::move(ee));
+    }
+    in.pools.push_back(std::move(p));
+  }
+  if (feeds_) {
+    std::array<RotationRecord, RotationLog::kCapacity> recs{};
+    const std::size_t n = feeds_->rotations().copy(recs.data(), recs.size());
+    for (std::size_t i = 0; i < n; ++i) {
+      ExportRotation r;
+      r.at_ms = recs[i].at_ms;
+      r.feed = std::string(feed_name(recs[i].feed));
+      r.from = recs[i].from;
+      r.to = recs[i].to;
+      r.reason = kRotationReasonNames[static_cast<std::size_t>(recs[i].reason) % 4];
+      in.rotations.push_back(std::move(r));
+    }
+  }
   return true;
 }
 
@@ -187,7 +263,7 @@ void LiveSession::finish_export() {
 
 static_assert(std::tuple_size_v<decltype(LiveSession::SlotStates{})> == Renderer::kLiveArcSlots);
 
-void LiveSession::pump_visuals(Renderer& renderer, float liveClock) noexcept {
+void LiveSession::pump_visuals(Renderer& renderer, float liveClock, const TapeFilter* filter) noexcept {
   const std::uint32_t gen = model_->seek_generation();
   if (gen != seek_seen_) {
     seek_seen_ = gen;
@@ -199,6 +275,8 @@ void LiveSession::pump_visuals(Renderer& renderer, float liveClock) noexcept {
   const float span = whale_span_s_;
   VisualEvent v;
   while (model_->visuals().try_pop(v)) {
+    // Search filters (>10m, whale:t2, venue:okx, liq) apply to the arcs too.
+    if (filter && filter->any() && !filter->pass(v.usd, v.tier, v.feed, v.liquidation != 0)) continue;
     LiveArcSlot slot;
     slot.src_hub = v.src_hub;
     slot.dst_hub = v.dst_hub;

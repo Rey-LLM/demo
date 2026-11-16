@@ -7,6 +7,11 @@
 //     hub_flows.json  the same matrix, nested by source and destination hub
 //     whales.csv      ts_utc,chain,asset,usd_value,tier,src,dst,source_label
 //     volume_tps.csv  ts_utc,feed,tx_count,usd_volume (1-second buckets)
+//     tape.csv        the whale & liquidation tape (its 10,000-row window)
+//     liquidations.csv the liquidation rows of that window
+// session.json also records the search filters, the sun time used for the
+// terminator, the trading-session states, the RPC endpoint pools with their
+// published limits, and the endpoint rotation history.
 // RFC 4180 CSV, UTF-8, ISO 8601 UTC timestamps, fixed decimals via
 // std::to_chars. Every file is written to a temporary name and renamed into
 // place, so a reader never sees a partial file.
@@ -40,6 +45,37 @@ struct ExportFeed {
   std::vector<FeedTransition> history;
 };
 
+struct ExportSession {
+  std::string id, city, tz, state, next_state, source, as_of;
+  std::int64_t next_change_ms = 0;  // 0: unknown
+};
+
+struct ExportEndpoint {
+  std::string url, rpc_url, limit, limit_source, as_of;
+  double max_rps = 0.0;
+  bool active = false;
+};
+
+struct ExportPool {
+  std::string feed;
+  std::vector<ExportEndpoint> endpoints;
+};
+
+struct ExportRotation {
+  std::int64_t at_ms = 0;
+  std::string feed;
+  unsigned from = 0, to = 0;
+  std::string reason;
+};
+
+// Search filters in effect when the export was requested.
+struct ExportFilters {
+  double min_usd = 0.0;
+  unsigned min_tier = 0;
+  std::vector<std::string> venues;  // feed ids
+  bool liquidations_only = false;
+};
+
 struct ExportInput {
   std::string version;
   std::string git_sha;
@@ -55,6 +91,15 @@ struct ExportInput {
   std::size_t whale_count = 0;
   const VolumeRecord* volumes = nullptr;
   std::size_t volume_count = 0;
+  // v4
+  std::vector<TapeEntry> tape;  // oldest first
+  ExportFilters filters;
+  std::int64_t sun_ms = 0;       // 0: not recorded
+  bool sun_fixed = false;        // --sun-time
+  double subsolar_lat = 0.0, subsolar_lon = 0.0;
+  std::vector<ExportSession> sessions;
+  std::vector<ExportPool> pools;
+  std::vector<ExportRotation> rotations;
 };
 
 // File contents (pure; used by the writer and the golden-file tests).
@@ -63,6 +108,8 @@ std::string export_hub_flows_csv(const ExportInput& in);
 std::string export_hub_flows_json(const ExportInput& in);
 std::string export_whales_csv(const ExportInput& in);
 std::string export_volume_csv(const ExportInput& in);
+std::string export_tape_csv(const ExportInput& in);
+std::string export_liquidations_csv(const ExportInput& in);
 
 // "2026-11-15T04:40:12.345Z" (ms) / "2026-11-15T04:40:12Z" (s) / "20261115T044012Z".
 std::string iso8601_ms(std::int64_t ms);
@@ -72,7 +119,7 @@ std::string iso8601_basic(std::int64_t ms);
 // Writes `text` to `path` through `path`.tmp + rename.
 bool write_file_atomic(const std::string& path, const std::string& text, std::string& error);
 
-// Writes the five files. On success `outDir` is the created directory.
+// Writes the seven files. On success `outDir` is the created directory.
 bool write_export(const std::string& rootDir, const ExportInput& in, std::string& outDir, std::string& error);
 
 class ExportService {

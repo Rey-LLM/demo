@@ -40,6 +40,8 @@ void print_usage(const char* argv0) {
       "                         (optional; alias --dataset, or pass the path as the only argument)\n"
       "  --format auto|csv|ftxb input format (default: auto-detect)\n"
       "  --data-dir DIR         read shaders/, config/ and assets/ from DIR instead of the binary\n"
+      "  --no-user-config       ignore config overrides in %%APPDATA%%\\ftviz (Windows) or ~/.config/ftviz\n"
+      "                         (order: embedded < user config dir < --data-dir < explicit option)\n"
       "  --hubs PATH            hub taxonomy (default: embedded config/hubs.json)\n"
       "  --render PATH          render settings (default: embedded config/render.json)\n"
       "  --theme PATH           palette and styling (default: embedded config/theme.json)\n"
@@ -257,6 +259,8 @@ bool parse_cli(int argc, char** argv, CliOptions& o, std::string& error) {
       }
     } else if (a == "--pin") {
       if (!str(o.pin_hub)) return false;
+    } else if (a == "--no-user-config") {
+      o.user_config = false;
     } else if (a == "--sun-time") {
       std::string_view v;
       if (!value(v)) return false;

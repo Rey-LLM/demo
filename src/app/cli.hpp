@@ -18,6 +18,7 @@ struct CliOptions {
   std::string render_path;  // --render (default: embedded config/render.json)
   std::string theme_path;   // --theme (default: embedded config/theme.json)
   std::string shader_dir;   // --shaders (default: embedded shaders/)
+  bool user_config = true;  // --no-user-config: ignore %APPDATA%\ftviz (~/.config/ftviz) overrides
 
   unsigned threads = 0;          // --threads: total layout/merge concurrency (0 = auto)
   unsigned parser_threads = 0;   // --parser-threads (0 = max(1, hw - 2))

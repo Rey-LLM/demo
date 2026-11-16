@@ -108,11 +108,35 @@ void gl_pre_call_hook(const char*, GLADapiproc, int, ...) { enter_foreign_code()
 void gl_post_call_hook(void*, const char*, GLADapiproc, int, ...) { leave_foreign_code(); }
 #endif
 
-// An explicit option wins, then --data-dir/<rel>, then the copy compiled
-// into the binary. Nothing next to the executable is ever required.
-std::string resolve_path(const std::string& explicitPath, const std::string& dataDir, const char* rel) {
+// Per-user configuration directory: %APPDATA%\ftviz on Windows,
+// $XDG_CONFIG_HOME/ftviz or ~/.config/ftviz elsewhere. Empty when unknown.
+std::string user_config_dir() {
+#if defined(_WIN32)
+  const char* appData = std::getenv("APPDATA");
+  return appData && *appData ? (fs::path(appData) / "ftviz").string() : std::string();
+#else
+  if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg && *xdg) return (fs::path(xdg) / "ftviz").string();
+  const char* home = std::getenv("HOME");
+  return home && *home ? (fs::path(home) / ".config" / "ftviz").string() : std::string();
+#endif
+}
+
+// Override order, lowest to highest: the copy compiled into the binary, a
+// file of the same name in the user configuration directory (config files
+// only), --data-dir/<rel>, then an explicit option. Nothing next to the
+// executable is ever required.
+std::string resolve_path(const std::string& explicitPath, const std::string& dataDir, const char* rel,
+                         const std::string& userDir = std::string()) {
   if (!explicitPath.empty()) return explicitPath;
   if (!dataDir.empty()) return (fs::path(dataDir) / rel).string();
+  if (!userDir.empty()) {
+    const fs::path p = fs::path(userDir) / fs::path(rel).filename();
+    std::error_code ec;
+    if (fs::is_regular_file(p, ec)) {
+      std::printf("[config] %s from %s\n", rel, p.string().c_str());
+      return p.string();
+    }
+  }
   return embedded_path(rel);
 }
 
@@ -289,6 +313,8 @@ struct InputState {
   std::array<int, 32> keys{};
   std::array<int, 32> mods{};
   unsigned key_count = 0;
+  std::array<std::uint32_t, 32> chars{};  // text input (command bar)
+  unsigned char_count = 0;
 };
 
 InputState* input_of(GLFWwindow* w) { return static_cast<InputState*>(glfwGetWindowUserPointer(w)); }
@@ -340,11 +366,16 @@ void install_callbacks(GLFWwindow* w, InputState* in) {
   glfwSetKeyCallback(w, [](GLFWwindow* win, int key, int, int action, int mods) {
     InputState* s = input_of(win);
     // Arrow keys repeat (timeline stepping); everything else acts on press.
-    const bool arrow = key == GLFW_KEY_LEFT || key == GLFW_KEY_RIGHT;
+    const bool arrow = key == GLFW_KEY_LEFT || key == GLFW_KEY_RIGHT || key == GLFW_KEY_UP || key == GLFW_KEY_DOWN ||
+                       key == GLFW_KEY_BACKSPACE;
     if ((action == GLFW_PRESS || (arrow && action == GLFW_REPEAT)) && s->key_count < s->keys.size()) {
       s->mods[s->key_count] = mods;
       s->keys[s->key_count++] = key;
     }
+  });
+  glfwSetCharCallback(w, [](GLFWwindow* win, unsigned int codepoint) {
+    InputState* s = input_of(win);
+    if (s->char_count < s->chars.size()) s->chars[s->char_count++] = codepoint;
   });
   double x = 0, y = 0;
   glfwGetCursorPos(w, &x, &y);
@@ -383,7 +414,20 @@ class Viewer {
         title_("ftviz - " + inputName),
         hud_stats_(graph, tax, ingest, inputName),
         live_hud_(tax, live ? live->mode() : ModelMode::Dataset, live ? live->feeds() : nullptr,
-                  live ? &live->config() : nullptr) {}
+                  live ? &live->config() : nullptr) {
+    const std::size_t n = std::min(tax.size(), hub_names_.size());
+    for (std::size_t i = 0; i < n; ++i) {
+      const HubDef& h = tax.hubs()[i];
+      hub_names_[i] = HubName{h.id, h.display_name.empty() ? std::string_view(h.id) : std::string_view(h.display_name),
+                              h.type == HubType::ChainCloud};
+    }
+    bar_.set_hubs(hub_names_.data(), n);
+    live_in_.filter = &bar_.filter();
+    live_in_.bar = &bar_;
+    live_in_.sessions = live ? live->sessions() : nullptr;
+    live_in_.routes_drawn = !earth.routes.points.empty();
+    live_in_.sun_override = cli.sun_time_set;
+  }
 
   int run();
 
@@ -394,6 +438,9 @@ class Viewer {
   void handle_key(int key, int mods);
   void frame_selection();
   void fly_to_preset(int index);
+  void fly_to_hub(int hub);
+  void run_command(const CommandResult& r);
+  void set_toast(std::string_view text, bool ok);
   void overview();
   void set_paused(bool paused);
   void seek_relative(std::int64_t deltaMs);
@@ -410,6 +457,9 @@ class Viewer {
   const WhaleSet& whales_;
   const CoastlineSet& coast_;
   const EarthData& earth_;
+  CommandBar bar_;
+  std::array<HubName, CommandBar::kMaxHubs> hub_names_{};
+  bool bar_skip_slash_ = false;  // the '/' that opened the bar arrives as a character too
   std::int64_t model_now_ms_ = 0;  // live / replay model clock (UTC ms), 0 until the first snapshot
   LayoutEngine& engine_;
   LiveSession* live_;
@@ -490,6 +540,47 @@ void Viewer::fly_to_preset(int index) {
   flying_ = true;
 }
 
+void Viewer::fly_to_hub(int hub) {
+  if (hub < 0 || static_cast<std::size_t>(hub) >= tax_.size()) return;
+  fly_from_ = CameraPose{camera_.target(), camera_.distance(), camera_.yaw(), camera_.pitch()};
+  fly_to_ = hub_pose(tax_.hubs()[static_cast<std::size_t>(hub)], rs_);
+  fly_t_ = 0.0f;
+  flying_ = true;  // eased slerp over kPresetFlightSeconds (1.2 s)
+  if (live_) {
+    pinned_hub_ = hub;
+    live_hud_dirty_ = true;
+  }
+}
+
+void Viewer::set_toast(std::string_view text, bool ok) {
+  toast_.clear();
+  toast_.str(text);
+  toast_left_ms_ = 3000.0;
+  live_in_.toast_ok = ok;
+}
+
+void Viewer::run_command(const CommandResult& r) {
+  switch (r.kind) {
+    case CommandKind::FlyHub:
+    case CommandKind::FlyChain:
+      fly_to_hub(r.hub);
+      break;
+    case CommandKind::FindAddress:
+    case CommandKind::FindTx: {
+      const TapeHit h = live_hud_.find_on_tape(r.arg, r.kind == CommandKind::FindTx);
+      if (h.valid) {
+        fly_to_hub(h.hub);
+      } else {
+        set_toast(r.kind == CommandKind::FindTx ? "TX NOT ON THE TAPE" : "ADDRESS NOT ON THE TAPE", false);
+      }
+      break;
+    }
+    default:  // filters were applied by the bar
+      live_hud_dirty_ = true;
+      break;
+  }
+}
+
 void Viewer::set_paused(bool paused) {
   paused_ = paused;
   replay_paused_ = paused;
@@ -515,7 +606,13 @@ void Viewer::seek_to_cursor(const LiveHudLayout& l, double fbX) {
 }
 
 void Viewer::request_export() {
-  if (live_) live_->exporter().request();
+  if (!live_) return;
+  LiveSession::ExportContext ctx;
+  ctx.filter = bar_.filter();
+  ctx.sun_ms = live_in_.sun_ms;
+  ctx.sun_fixed = cli_.sun_time_set;
+  live_->set_export_context(ctx);
+  live_->exporter().request();
 }
 
 void Viewer::refresh_live_hud() {
@@ -551,6 +648,39 @@ void Viewer::frame_selection() {
 }
 
 void Viewer::handle_key(int key, int mods) {
+  // Command bar: "/" or Ctrl+K opens it; while open it owns the keyboard.
+  if (bar_.is_open()) {
+    switch (key) {
+      case GLFW_KEY_ESCAPE:
+        bar_.close();
+        break;
+      case GLFW_KEY_ENTER:
+      case GLFW_KEY_KP_ENTER:
+        if (bar_.result_count() > 0) run_command(bar_.accept());
+        break;
+      case GLFW_KEY_BACKSPACE:
+        bar_.backspace();
+        break;
+      case GLFW_KEY_UP:
+        bar_.move_selection(-1);
+        break;
+      case GLFW_KEY_DOWN:
+      case GLFW_KEY_TAB:
+        bar_.move_selection(1);
+        break;
+      default:
+        break;  // text arrives through the character callback
+    }
+    live_hud_dirty_ = true;
+    return;
+  }
+  if (key == GLFW_KEY_SLASH || (key == GLFW_KEY_K && (mods & GLFW_MOD_CONTROL))) {
+    bar_.open();
+    bar_skip_slash_ = key == GLFW_KEY_SLASH;
+    live_hud_dirty_ = true;
+    return;
+  }
+  if (key == GLFW_KEY_UP || key == GLFW_KEY_DOWN || key == GLFW_KEY_BACKSPACE) return;  // bar-only keys
   if (key >= GLFW_KEY_1 && key <= GLFW_KEY_5) {
     fly_to_preset(key - GLFW_KEY_1 + 1);
     return;
@@ -609,6 +739,19 @@ void Viewer::handle_input(int fbw, int fbh) {
 
   for (unsigned i = 0; i < input_.key_count; ++i) handle_key(input_.keys[i], input_.mods[i]);
   input_.key_count = 0;
+  for (unsigned i = 0; i < input_.char_count; ++i) {
+    const std::uint32_t c = input_.chars[i];
+    if (bar_skip_slash_ && c == '/') {
+      bar_skip_slash_ = false;
+      continue;
+    }
+    if (bar_.is_open()) {
+      bar_.insert(c);
+      live_hud_dirty_ = true;
+    }
+  }
+  input_.char_count = 0;
+  bar_skip_slash_ = false;
 
   // Cursor coordinates are in window units; HUD and pick targets are in pixels.
   const double sx = static_cast<double>(fbw) / ww, sy = static_cast<double>(fbh) / wh;
@@ -661,6 +804,13 @@ void Viewer::handle_input(int fbw, int fbh) {
       request_export();
     } else if (timelineOn && live_layout_.timeline.contains(px, py)) {
       seek_to_cursor(live_layout_, px);
+    } else if (const FilterKind chip = live_ && show_hud_ ? live_hud_.chip_hit(live_layout_, px, py) : FilterKind::Count;
+               chip != FilterKind::Count) {
+      bar_.filter().clear(chip);  // click a chip to remove that filter
+      live_hud_dirty_ = true;
+    } else if (const TapeHit hit = live_ && show_hud_ ? live_hud_.tape_hit(live_layout_, px, py) : TapeHit{};
+               hit.valid) {
+      fly_to_hub(hit.hub);  // click a tape row: focus its hub
     } else {
       const Ray ray = pixel_ray(camera_.position(), inv_view_proj_, static_cast<float>(px), static_cast<float>(py),
                                 static_cast<float>(fbw), static_cast<float>(fbh));
@@ -801,6 +951,7 @@ int Viewer::run() {
     sinceStartMs += dtMs;
 
     Stopwatch cpu;
+    live_in_.now_s = sinceStartMs * 1e-3;
     live_layout_ = LiveHud::layout(fbw, fbh, hud_stats_.left_bottom(fbh));
     handle_input(fbw, fbh);
     std::optional<std::uint32_t> picked;
@@ -825,7 +976,7 @@ int Viewer::run() {
         const float pos = static_cast<float>(model.position_ms()) * 1e-3f;
         if (std::fabs(pos - live_clock_) > 0.15f) live_clock_ = pos;
       }
-      live_->pump_visuals(*renderer_, live_clock_);
+      live_->pump_visuals(*renderer_, live_clock_, &bar_.filter());
       if (!exportAfterDone && sinceStartMs >= static_cast<double>(cli_.export_after) * 1000.0) {
         exportAfterDone = true;
         export_pending_exit_ = true;
@@ -899,7 +1050,17 @@ int Viewer::run() {
     p.pinned_hub = pinned_hub_;
     // Terminator: --sun-time, else the model clock (wall clock LIVE, capture
     // time REPLAY), else the wall clock.
-    p.sun_dir = sun_vector(cli_.sun_time_set ? cli_.sun_time_ms : model_now_ms_ > 0 ? model_now_ms_ : wall_clock_ms());
+    {
+      const std::int64_t sunMs =
+          cli_.sun_time_set ? cli_.sun_time_ms : model_now_ms_ > 0 ? model_now_ms_ : wall_clock_ms();
+      const SubsolarPoint sp = subsolar_point(sunMs);
+      float sv[3];
+      sun_direction(sp, sv);
+      p.sun_dir = glm::vec3(sv[0], sv[1], sv[2]);
+      live_in_.sun_ms = sunMs;
+      live_in_.subsolar_lat = sp.lat_deg;
+      live_in_.subsolar_lon = sp.lon_deg;
+    }
     inv_view_proj_ = glm::inverse(p.proj * p.view);
     renderer_->draw_frame(p);
 
@@ -1001,6 +1162,9 @@ int render_screenshot(const CliOptions& cli, const RenderSettings& rs, const std
         if (const auto hub = tax.find(cli.pin_hub)) hudIn.pinned_hub = static_cast<int>(*hub);
       }
       hudIn.timeline_visible = live->mode() == ModelMode::Replay;
+      hudIn.sessions = live->sessions();
+      hudIn.routes_drawn = !earth.routes.points.empty();
+      hudIn.now_s = 10.0;  // no scroll animation in screenshots
       hudIn.timeline_pos_s = static_cast<double>(live->model().timeline_ms()) / 1000.0;
       hudIn.timeline_len_s = static_cast<double>(live->model().timeline_duration_ms()) / 1000.0;
       hudIn.capture_synthetic = live->capture() && live->capture()->synthetic();
@@ -1020,6 +1184,17 @@ int render_screenshot(const CliOptions& cli, const RenderSettings& rs, const std
       }
     }
     {
+      const SubsolarPoint sp = subsolar_point(sunMs);
+      hudIn.sun_ms = sunMs;
+      hudIn.sun_override = cli.sun_time_set;
+      hudIn.subsolar_lat = sp.lat_deg;
+      hudIn.subsolar_lon = sp.lon_deg;
+      if (live) {
+        if (const LiveSnapshot* snap = live->model().snapshots().acquire()) {
+          liveHud.refresh(*snap, hudIn);  // again, now with the sun line
+          live->model().snapshots().release(snap);
+        }
+      }
       char iso[32];
       format_iso8601_utc(sunMs, iso, sizeof(iso));
       std::printf("[screenshot] sun time %s\n", iso);
@@ -1073,11 +1248,12 @@ int run_application(const CliOptions& cli, const std::string& exeDir) {
 
   // ---- configuration ---------------------------------------------------------
   (void)exeDir;
-  const std::string hubsPath = resolve_path(cli.hubs_path, cli.data_dir, "config/hubs.json");
-  const std::string renderPath = resolve_path(cli.render_path, cli.data_dir, "config/render.json");
-  const std::string themePath = resolve_path(cli.theme_path, cli.data_dir, "config/theme.json");
+  const std::string userDir = cli.user_config ? user_config_dir() : std::string();
+  const std::string hubsPath = resolve_path(cli.hubs_path, cli.data_dir, "config/hubs.json", userDir);
+  const std::string renderPath = resolve_path(cli.render_path, cli.data_dir, "config/render.json", userDir);
+  const std::string themePath = resolve_path(cli.theme_path, cli.data_dir, "config/theme.json", userDir);
   const std::string shaderDir = resolve_path(cli.shader_dir, cli.data_dir, "shaders");
-  const std::string feedsPath = resolve_path(cli.feeds_path, cli.data_dir, "config/feeds.json");
+  const std::string feedsPath = resolve_path(cli.feeds_path, cli.data_dir, "config/feeds.json", userDir);
   const std::string assetsDir = resolve_path(std::string(), cli.data_dir, "assets");
 
   auto taxonomy = HubTaxonomy::load(hubsPath, err);

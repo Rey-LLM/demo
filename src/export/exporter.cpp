@@ -264,9 +264,106 @@ std::string export_volume_csv(const ExportInput& in) {
   return out;
 }
 
+namespace {
+
+void append_tag(std::string& out, const char (&tag)[4]) {
+  if (tag[0] == 0) return;
+  for (char c : tag) {
+    if (c > 32 && c < 127 && c != '"' && c != ',') out.push_back(c);
+  }
+}
+
+std::string_view tape_side(const TapeEntry& t) {
+  const bool buy = (t.flags & kEvBuy) != 0;
+  if (t.kind == EventKind::Liquidation) return buy ? "SHORT" : "LONG";  // the position that was closed
+  if (t.kind == EventKind::Trade) return buy ? "BUY" : "SELL";
+  return "TRANSFER";
+}
+
+std::string_view tape_kind(const TapeEntry& t) {
+  switch (t.kind) {
+    case EventKind::Liquidation: return "LIQUIDATION";
+    case EventKind::Trade: return "TRADE";
+    default: return "TRANSACTION";
+  }
+}
+
+std::string_view tape_quote(const TapeEntry& t) {
+  return t.quote_code == 0 || t.quote_code > kAssetCount ? std::string_view()
+                                                         : asset_name(static_cast<Asset>(t.quote_code - 1u));
+}
+
+}  // namespace
+
+std::string export_tape_csv(const ExportInput& in) {
+  std::string out =
+      "ts_utc,venue,kind,asset,quote,side,usd_value,amount,price,tier,src,dst,from,to,source_label\r\n";
+  for (const TapeEntry& t : in.tape) {
+    out += iso8601_ms(t.ts_ms);
+    out.push_back(',');
+    out.append(kFeedVenues[static_cast<std::size_t>(t.feed) % kFeedCount]);
+    out.push_back(',');
+    out.append(tape_kind(t));
+    out.push_back(',');
+    out.append(asset_name(t.asset));
+    out.push_back(',');
+    out.append(tape_quote(t));
+    out.push_back(',');
+    out.append(tape_side(t));
+    out.push_back(',');
+    append_fixed(out, t.usd_value, 2);
+    out.push_back(',');
+    append_fixed(out, t.amount, 8);
+    out.push_back(',');
+    append_fixed(out, t.price, 6);
+    out.push_back(',');
+    append_u64(out, t.tier);
+    out.push_back(',');
+    append_csv(out, hub_id(in, t.src_hub));
+    out.push_back(',');
+    append_csv(out, hub_id(in, t.dst_hub));
+    out.push_back(',');
+    append_tag(out, t.from_tag);
+    out.push_back(',');
+    append_tag(out, t.to_tag);
+    out.push_back(',');
+    out.append(label_name(t.label));
+    out += "\r\n";
+  }
+  return out;
+}
+
+std::string export_liquidations_csv(const ExportInput& in) {
+  std::string out = "ts_utc,venue,asset,quote,position,usd_value,amount,price,tier,source_label\r\n";
+  for (const TapeEntry& t : in.tape) {
+    if (t.kind != EventKind::Liquidation) continue;
+    out += iso8601_ms(t.ts_ms);
+    out.push_back(',');
+    out.append(kFeedVenues[static_cast<std::size_t>(t.feed) % kFeedCount]);
+    out.push_back(',');
+    out.append(asset_name(t.asset));
+    out.push_back(',');
+    out.append(tape_quote(t));
+    out.push_back(',');
+    out.append(tape_side(t));
+    out.push_back(',');
+    append_fixed(out, t.usd_value, 2);
+    out.push_back(',');
+    append_fixed(out, t.amount, 8);
+    out.push_back(',');
+    append_fixed(out, t.price, 6);
+    out.push_back(',');
+    append_u64(out, t.tier);
+    out.push_back(',');
+    out.append(label_name(t.label));
+    out += "\r\n";
+  }
+  return out;
+}
+
 std::string export_session_json(const ExportInput& in) {
   std::string o = "{\n";
-  o += "  \"format\": \"ftviz-export/1\",\n  \"version\": ";
+  o += "  \"format\": \"ftviz-export/2\",\n  \"version\": ";
   append_json_string(o, in.version);
   o += ",\n  \"git_sha\": ";
   append_json_string(o, in.git_sha);
@@ -344,10 +441,120 @@ std::string export_session_json(const ExportInput& in) {
     o += ", \"label\": \"MODELED\"}";
   }
   o += in.corridors.empty() ? "],\n" : "\n  ],\n";
+
+  // v4: filters, sun, trading sessions, endpoint pools and rotations.
+  o += "  \"filters\": {\"min_usd\": ";
+  if (in.filters.min_usd > 0.0) {
+    append_fixed(o, in.filters.min_usd, 2);
+  } else {
+    o += "null";
+  }
+  o += ", \"min_whale_tier\": ";
+  if (in.filters.min_tier > 0) {
+    append_u64(o, in.filters.min_tier);
+  } else {
+    o += "null";
+  }
+  o += ", \"venues\": [";
+  for (std::size_t i = 0; i < in.filters.venues.size(); ++i) {
+    if (i) o += ", ";
+    append_json_string(o, in.filters.venues[i]);
+  }
+  o += in.filters.liquidations_only ? "], \"liquidations_only\": true},\n" : "], \"liquidations_only\": false},\n";
+  o += "  \"sun\": ";
+  if (in.sun_ms != 0) {
+    o += "{\"time_utc\": ";
+    append_json_string(o, iso8601_s(in.sun_ms / 1000));
+    o += in.sun_fixed ? ", \"source\": \"--sun-time\"" : ", \"source\": \"model clock\"";
+    o += ", \"subsolar_lat\": ";
+    append_fixed(o, in.subsolar_lat, 3);
+    o += ", \"subsolar_lon\": ";
+    append_fixed(o, in.subsolar_lon, 3);
+    o += ", \"model\": \"NOAA / Meeus low-precision solar position\"},\n";
+  } else {
+    o += "null,\n";
+  }
+  o += "  \"trading_sessions\": [";
+  for (std::size_t i = 0; i < in.sessions.size(); ++i) {
+    const ExportSession& e = in.sessions[i];
+    o += i ? ",\n    {" : "\n    {";
+    o += "\"id\": ";
+    append_json_string(o, e.id);
+    o += ", \"city\": ";
+    append_json_string(o, e.city);
+    o += ", \"tz\": ";
+    append_json_string(o, e.tz);
+    o += ", \"state\": ";
+    append_json_string(o, e.state);
+    o += ", \"next_state\": ";
+    append_json_string(o, e.next_state);
+    o += ", \"next_change_utc\": ";
+    if (e.next_change_ms != 0) {
+      append_json_string(o, iso8601_s(e.next_change_ms / 1000));
+    } else {
+      o += "null";
+    }
+    o += ", \"source\": ";
+    append_json_string(o, e.source);
+    o += ", \"as_of\": ";
+    append_json_string(o, e.as_of);
+    o += ", \"corridor_intensity\": \"MODELED\"}";
+  }
+  o += in.sessions.empty() ? "],\n" : "\n  ],\n";
+  o += "  \"endpoint_pools\": [";
+  for (std::size_t i = 0; i < in.pools.size(); ++i) {
+    const ExportPool& p = in.pools[i];
+    o += i ? ",\n    {" : "\n    {";
+    o += "\"feed\": ";
+    append_json_string(o, p.feed);
+    o += ", \"endpoints\": [";
+    for (std::size_t k = 0; k < p.endpoints.size(); ++k) {
+      const ExportEndpoint& e = p.endpoints[k];
+      o += k ? ",\n      {" : "\n      {";
+      o += "\"url\": ";
+      append_json_string(o, e.url);
+      o += ", \"rpc_url\": ";
+      if (e.rpc_url.empty()) {
+        o += "null";
+      } else {
+        append_json_string(o, e.rpc_url);
+      }
+      o += ", \"budget_rps\": ";
+      append_fixed(o, e.max_rps, 2);
+      o += ", \"published_limit\": ";
+      append_json_string(o, e.limit);
+      o += ", \"limit_source\": ";
+      append_json_string(o, e.limit_source);
+      o += ", \"as_of\": ";
+      append_json_string(o, e.as_of);
+      o += e.active ? ", \"active\": true}" : ", \"active\": false}";
+    }
+    o += p.endpoints.empty() ? "]}" : "\n    ]}";
+  }
+  o += in.pools.empty() ? "],\n" : "\n  ],\n";
+  o += "  \"endpoint_rotations\": [";
+  for (std::size_t i = 0; i < in.rotations.size(); ++i) {
+    const ExportRotation& r = in.rotations[i];
+    o += i ? ",\n    {" : "\n    {";
+    o += "\"at_utc\": ";
+    append_json_string(o, iso8601_ms(r.at_ms));
+    o += ", \"feed\": ";
+    append_json_string(o, r.feed);
+    o += ", \"from\": ";
+    append_u64(o, r.from);
+    o += ", \"to\": ";
+    append_u64(o, r.to);
+    o += ", \"reason\": ";
+    append_json_string(o, r.reason);
+    o += "}";
+  }
+  o += in.rotations.empty() ? "],\n" : "\n  ],\n";
   o += "  \"counters\": {\"whales\": ";
   append_u64(o, in.whale_count);
   o += ", \"volume_rows\": ";
   append_u64(o, in.volume_count);
+  o += ", \"tape_rows\": ";
+  append_u64(o, in.tape.size());
   o += ", \"whale_journal_overflow\": ";
   append_u64(o, in.snapshot ? in.snapshot->whale_overflow : 0);
   o += ", \"volume_journal_overflow\": ";
@@ -408,6 +615,8 @@ bool write_export(const std::string& rootDir, const ExportInput& in, std::string
       {"hub_flows.json", export_hub_flows_json(in)},
       {"whales.csv", export_whales_csv(in)},
       {"volume_tps.csv", export_volume_csv(in)},
+      {"tape.csv", export_tape_csv(in)},
+      {"liquidations.csv", export_liquidations_csv(in)},
       {"session.json", export_session_json(in)},  // last: its presence marks a complete export
   };
   for (const auto& [name, text] : files) {

@@ -200,7 +200,7 @@ int main(int argc, char** argv) {
 
   Ctx c;
   c.feeds = *feeds;
-  c.t0 = 1794657600000;  // 2026-11-14T12:00:00Z (nominal capture start)
+  c.t0 = 1794837600000;  // 2026-11-16T14:00:00Z, a Monday (nominal capture start: London open, New York pre-open)
   Rng rng(seed);
   const std::int64_t D = static_cast<std::int64_t>(seconds) * 1000;
 

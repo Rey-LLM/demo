@@ -87,6 +87,10 @@ class LiveHud {
   // Tape row under (x, y), if any; filter chip under (x, y) (FilterKind::Count: none).
   [[nodiscard]] TapeHit tape_hit(const LiveHudLayout& l, double x, double y) const noexcept;
   [[nodiscard]] FilterKind chip_hit(const LiveHudLayout& l, double x, double y) const noexcept;
+  // Search (addr: / tx:) over the rows currently on the tape: an address
+  // matches a row's sender or recipient fragment (first two and last two
+  // characters), a transaction its source id hash.
+  [[nodiscard]] TapeHit find_on_tape(std::string_view query, bool tx) const noexcept;
   [[nodiscard]] std::size_t session_lines() const noexcept { return session_lines_; }
   [[nodiscard]] std::string_view session_line(std::size_t i) const noexcept { return sessions_[i].view(); }
 

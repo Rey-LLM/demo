@@ -1,9 +1,11 @@
 #include "app/live_hud.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 
 #include "app/hud_stats.hpp"
+#include "ingest/live/parsers.hpp"
 #include "render/font.hpp"
 
 namespace ftv {
@@ -525,6 +527,34 @@ TapeHit LiveHud::tape_hit(const LiveHudLayout& l, double x, double y) const noex
   const auto row = static_cast<std::size_t>((y - top) / l.tape_row_h);
   if (row >= tape_lines_) return {};
   return tape_[row].hit;
+}
+
+TapeHit LiveHud::find_on_tape(std::string_view q, bool tx) const noexcept {
+  if (q.empty()) return {};
+  if (tx) {
+    const std::uint64_t h = source_id_hash(q);
+    for (std::size_t i = 0; i < tape_lines_; ++i) {
+      if (tape_[i].hit.valid && tape_[i].hit.id_hash == h) return tape_[i].hit;
+    }
+    return {};
+  }
+  const bool evm = q.size() > 2 && q[0] == '0' && (q[1] == 'x' || q[1] == 'X');
+  if (evm) q.remove_prefix(2);
+  if (q.size() < 4) return {};
+  const char tag[4] = {q[0], q[1], q[q.size() - 2], q[q.size() - 1]};
+  auto same = [evm](const char* a, const char* b) {
+    for (int k = 0; k < 4; ++k) {
+      const char x = evm ? static_cast<char>(std::tolower(static_cast<unsigned char>(a[k]))) : a[k];
+      const char y = evm ? static_cast<char>(std::tolower(static_cast<unsigned char>(b[k]))) : b[k];
+      if (x != y) return false;
+    }
+    return true;
+  };
+  for (std::size_t i = 0; i < tape_lines_; ++i) {
+    const TapeHit& h = tape_[i].hit;
+    if (h.valid && (same(h.from_tag, tag) || same(h.to_tag, tag))) return h;
+  }
+  return {};
 }
 
 FilterKind LiveHud::chip_hit(const LiveHudLayout& l, double x, double y) const noexcept {
