@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ftviz VERSION 3.0.0 LANGUAGES C CXX)
+project(ftviz VERSION 4.0.0 LANGUAGES C CXX)
 
 # ----------------------------------------------------------------------------
 # Global settings
@@ -217,6 +217,16 @@ set(FTVIZ_EMBEDDED_FILES
   assets/coastlines_110m.bin
   assets/coastlines_50m.bin
   assets/replay/default.ftxcap)
+# Earth layers (v4), embedded when present: built by tools/build_cables.py and
+# tools/build_citylights.py from the datasets named in THIRD_PARTY_NOTICES.md.
+# Without them the cable and city-light layers are off and the log says so.
+foreach(f assets/cables.bin assets/citylights.bin)
+  if(EXISTS ${PROJECT_SOURCE_DIR}/${f})
+    list(APPEND FTVIZ_EMBEDDED_FILES ${f})
+  else()
+    message(STATUS "ftviz: ${f} not found; that layer is off in this build")
+  endif()
+endforeach()
 set(FTVIZ_EMBED_DIR ${PROJECT_BINARY_DIR}/generated)
 set(FTVIZ_EMBED_DEPS)
 foreach(f IN LISTS FTVIZ_EMBEDDED_FILES)

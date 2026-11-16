@@ -1063,3 +1063,146 @@ whales, newest first.
 the HUD is the existing instanced glyph renderer, glad replaces GLEW, and
 the existing RFC 6455 client in `net.cpp` handles WebSockets. Swapping them
 in would have replaced working, tested code with new dependencies.
+
+## 16. v4: earth, pools, sessions, search, tape
+
+### 16.1 Day and night
+
+`src/model/solar.cpp` computes the subsolar point from UTC with the NOAA /
+Meeus low-precision formulas (declination plus the equation of time). The
+unit tests compare it with astropy 8.0.2 (`get_sun` transformed to ITRS) on
+six instants from 2024 to 2026: every latitude and longitude is within
+0.2°. The sun direction enters the `Frame` UBO (`u_sun`).
+
+Day factor `d = smoothstep(-0.10, 0.10, N·sun)`, about ±6° around the
+terminator. The base colour is mixed in `composite.frag`, after tone
+mapping: the globe is ray-cast once more per pixel and the display-referred
+base becomes `mix(Obsidian, Day Tint, d)` with analytic coverage at the limb.
+Doing it there keeps `#0B0E13` and `#050608` exact on screen (mixing in HDR
+before ACES would shift both). The render test checks that more than half of
+the disk pixels are within ±2 of each hex on the day and night side.
+
+Coastlines are drawn at `mix(0.5, 1, d)` of their alpha. The rim
+(`atmosphere.frag`) is scaled by `mix(0.15, 1, d)` so it reads as the sunlit
+limb, and inside a band of 2.5× the twilight width around the terminator it
+blends toward Night Lights by `rim_twilight` (0.35).
+
+City lights: `globe.frag` samples a BC4 map (`GL_COMPRESSED_RED_RGTC1`,
+2048×1024 with its mip chain) with `textureGrad`, taking the longitude
+gradient from whichever of the two longitude fields has no seam at that
+pixel, so the mip level is right across the antimeridian. The value is
+already log-toned (`tools/build_citylights.py`, `log1p(64 x)/log1p(64)`).
+Output: `Night Lights × 1.5 × value × (1 − smoothstep(0, 0.5, d))`, into the
+scene attachment only. There are no lights where `d ≥ 0.5` (asserted in the
+render test against a CPU ray cast of every lit pixel), and the emissive
+attachment stays black, so city lights never bloom.
+
+### 16.2 Cables and MODELED routes
+
+`assets/cables.bin` (format in `src/model/cables.hpp`) holds polylines
+simplified with Douglas–Peucker on the sphere at 5 km cross-track
+tolerance and a corridor per cable (TRANS_ATLANTIC, TRANS_PACIFIC,
+EUROPE_ASIA, INTRA_ASIA, OTHER) from the regions its vertices touch. The
+renderer reuses the coastline program with the cable buffer bound to SSBO
+11: one instanced draw, one instance per segment, Amber at alpha 0.12
+(clamped to 0.10–0.16 by the theme loader), same at night.
+
+Routing runs once at startup. Polyline vertices within 2 km of each other
+merge into one graph node. Each FIAT_CENTER hub links to the landing points
+within 800 km, or to its three nearest within 2,500 km. Dijkstra from every
+hub gives a path per hub pair; a path more than 2.6× the great-circle
+distance, or no path, falls back to the great circle. Paths never transit
+another hub. Routes are resampled to at most 512 points by arc length and
+uploaded to SSBO 14 (first, count per pair) and 15 (unit vectors with the
+normalised length in w). `whale.vert` binary-searches the route for each of
+its 129 ribbon vertices. The HUD and README call these routes
+"ROUTE · MODELED (cable geometry)": real traffic routing is not public.
+
+### 16.3 Post
+
+Bloom is a 6-level dual-filter (Kawase) chain on the emissive attachment
+(6 downsamples, 5 upsamples). Only whales and liquidations write emissive:
+v4 removed the hub glow, and flow trails (tier 0) now go to the scene
+attachment in Amber. ACES fitted, 8× MSAA requested (the driver maximum
+when lower), no FXAA. New GPU timers: CABLES and BLOOM (POST is now the
+composite alone).
+
+Draws per frame: scene 9 (globe, rim, coast, cables, nodes, 2 arc draws,
+whales, hubs), post 14 with 6 bloom levels (2 blits are not draws). The
+count does not depend on the data.
+
+### 16.4 RPC endpoint pools
+
+ETH and SOL list three endpoints each in `feeds.json` (`pool`), each with
+its own token bucket (`max_requests_per_s`, `burst`), the provider's
+published limit as text, the documentation URL and a retrieval date.
+`src/ingest/live/endpoint_pool.hpp` states the rules:
+
+- one endpoint is active; every request takes a token from the active
+  endpoint's bucket. An empty bucket skips the request; it never moves the
+  request to another endpoint, so the pool cannot be used to exceed a
+  limit it is already at;
+- only a provider-side failure rotates: connect/TLS/HTTP error, timeout or
+  an explicit 429 / rate-limit message. The failed endpoint cools down
+  30 s after an error, 120 s after a 429, doubling on repeats up to 15 min;
+- health is a latency EWMA, an error-rate EWMA and a 429 count; the active
+  endpoint's latency is on the feed's HUD row;
+- every rotation is logged (time, from, to, reason) and exported.
+
+Budgets are capped at 5 requests/s per endpoint in the loader whatever the
+config says. The limits in the shipped config were not re-read from the
+providers' pages for v4 and say `as_of: UNVERIFIED`.
+
+### 16.5 New feeds
+
+Binance USDⓈ-M `!forceOrder@arr` (liquidations, BINANCE_LIQ) and OKX
+(`trades` on BTC/ETH/SOL-USDT and `liquidation-orders` on SWAP, contract
+sizes from the public instruments endpoint at connect, `ping` every 20 s).
+A liquidation's side is the order side: a SELL closes a LONG. When every
+configured URL of a venue (its own documented hosts) answers HTTP 451, or
+403 at the WebSocket upgrade, the feed becomes `GEO_BLOCKED`: it is left
+out, no REPLAY stands in for it, and it re-checks after 10 minutes. No
+proxy or other region is ever tried.
+
+### 16.6 Trading sessions
+
+`config/sessions.json` lists TSE, LSE, NYSE/Nasdaq and SSE: IANA zone,
+pre-open, open, close, lunch break, holidays for this year and next, and a
+source URL per exchange. At startup each zone is expanded through
+`std::chrono::locate_zone` into a table of UTC offset intervals; after that
+`state()` is a table lookup with no tzdb call and no allocation. States:
+PRE, OPEN, LUNCH, CLOSED, HOLIDAY; the HUD chip reads e.g.
+`LONDON    OPEN    02:28 to close`. Corridor intensity is the BIS daily
+mean × the mean session factor of its two hubs (OPEN 1.0, LUNCH 0.5, PRE
+0.4, CLOSED 0.2, HOLIDAY 0.1), labelled MODELED. The holiday lists are
+marked UNVERIFIED: they were compiled from the published rules and have not
+been checked line by line against the exchanges' calendars.
+
+### 16.7 Search, tape, export
+
+`/` or Ctrl+K opens the command bar (`src/ui/command_bar.hpp`, fixed
+arrays, no allocation). One term per query: a hub or chain name (fuzzy),
+`>10m`, `whale:t2`, `venue:okx`, `liq`, `addr:…`, `tx:…`; at most 6
+results; Enter flies there with the 1.2 s eased slerp and pins the hub
+panel. Filters show as chips above the tape and are removed by a click.
+They apply to the tape and to the arcs (the render thread drops filtered
+visual events before they take a slot). `addr:` and `tx:` search the rows on
+the tape (address fragments and the source id hash).
+
+The tape is the right-hand column: 12 rows newest first, scrolling with a
+1 s ease when a row arrives, only the tier marker (`WHALE T1..T3`, `LIQ`) in
+Neon Gold. The model keeps the last 10,000 rows in a ring; a click on a
+row flies to its hub.
+
+Exports gain `tape.csv` (the 10,000-row window) and `liquidations.csv`;
+`session.json` gains `filters`, `sun`, `trading_sessions`, `endpoint_pools`
+and `endpoint_rotations` (format `ftviz-export/2`). Golden files cover all
+seven files.
+
+### 16.8 Configuration override order
+
+Lowest to highest: the copy compiled into the binary; a file of the same
+name in `%APPDATA%\ftviz\` (Windows) or `$XDG_CONFIG_HOME/ftviz`,
+`~/.config/ftviz` (elsewhere); `--data-dir`; an explicit option
+(`--feeds`, `--theme`, …). `--no-user-config` skips the user directory. The
+log names every file taken from the user directory.

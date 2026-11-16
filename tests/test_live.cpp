@@ -632,3 +632,129 @@ TEST_CASE("live: stale watchdog degrades a silent feed; parse errors degrade wit
   CHECK(sm.state() == FeedState::Degraded);
   CHECK(!sm.replay_active());
 }
+
+TEST_CASE("live: GEO_BLOCKED leaves the feed out: no replay stand-in, a message recovers it") {
+  FeedStateMachine sm(15000, 30000);
+  sm.on_connecting(0);
+  CHECK(sm.on_geo_blocked(200));
+  CHECK(sm.state() == FeedState::GeoBlocked);
+  CHECK(std::string(kFeedStateNames[static_cast<std::size_t>(sm.state())]) == "GEO_BLOCKED");
+  CHECK(!sm.tick(60000));
+  CHECK(!sm.tick(3600000));
+  CHECK(!sm.replay_active());  // a refused venue is never replaced by synthetic data
+  CHECK(sm.label() == SourceLabel::Live);
+  // A later re-check that gets through.
+  sm.on_connecting(3600100);
+  CHECK(sm.on_message(3600200));
+  CHECK(sm.state() == FeedState::Live);
+  // An ordinary failure after that falls back as usual.
+  sm.on_offline(3601000);
+  CHECK(sm.tick(3616100));
+  CHECK(sm.replay_active());
+}
+
+TEST_CASE("live: Binance USD-M forceOrder liquidations") {
+  Env e;
+  e.ctx.hubs.quote_hub[static_cast<std::size_t>(Asset::USDT)] = 0;
+  {
+    Fixture f("binance_force_order.json");
+    REQUIRE(f.ok);
+    const ParseResult r = parse_binance_force_order(e.parser, f.buf.data(), f.len, e.ctx, e.batch);
+    CHECK(r.status == ParseStatus::Ok);
+    REQUIRE(e.batch.size() == 1);
+    const LiveEvent& ev = e.batch[0];
+    CHECK(ev.feed == FeedId::BinanceLiq);
+    CHECK(ev.kind == EventKind::Liquidation);
+    CHECK(ev.asset == Asset::BTC);
+    CHECK(quote_of(ev) == Asset::USDT);
+    CHECK(near(ev.amount, 0.5));            // filled quantity
+    CHECK(near(ev.price, 59812.40));        // average price
+    CHECK(near(ev.usd_value, 0.5 * 59812.40));
+    CHECK((ev.flags & kEvBuy) == 0);        // SELL order: a LONG was liquidated
+    CHECK(ev.src_hub == 8 && ev.dst_hub == 0);
+    CHECK_EQ(ev.ts_ms, std::int64_t{1794717615100});
+  }
+  {
+    Fixture f("binance_force_order_alt.json");
+    REQUIRE(f.ok);
+    e.batch.clear();
+    const ParseResult r = parse_binance_force_order(e.parser, f.buf.data(), f.len, e.ctx, e.batch);
+    CHECK(r.status == ParseStatus::Ok);  // another market: acknowledged, no event
+    CHECK(r.transactions_seen == 1);
+    CHECK(e.batch.size() == 0);
+  }
+  {
+    Fixture f("malformed.json");
+    REQUIRE(f.ok);
+    e.batch.clear();
+    CHECK(parse_binance_force_order(e.parser, f.buf.data(), f.len, e.ctx, e.batch).status != ParseStatus::Ok);
+    CHECK(e.batch.size() == 0);
+  }
+}
+
+TEST_CASE("live: OKX instruments, trades, liquidation orders, error and ack") {
+  Env e;
+  e.ctx.hubs.quote_hub[static_cast<std::size_t>(Asset::USDT)] = 0;
+  OkxContracts contracts;
+  {
+    Fixture f("okx_instruments.json");
+    REQUIRE(f.ok);
+    CHECK(parse_okx_instruments(e.parser, f.buf.data(), f.len, contracts).status == ParseStatus::Ok);
+    CHECK(contracts.count == 2);  // BTC linear and inverse; XRP is not valued
+    const OkxContract* lin = contracts.find("BTC-USDT-SWAP");
+    const OkxContract* inv = contracts.find("BTC-USD-SWAP");
+    REQUIRE(lin != nullptr && inv != nullptr);
+    CHECK(!lin->inverse && near(lin->ct_val, 0.01));
+    CHECK(inv->inverse && near(inv->ct_val, 100.0));
+  }
+  {
+    Fixture f("okx_trades.json");
+    REQUIRE(f.ok);
+    const ParseResult r = parse_okx(e.parser, f.buf.data(), f.len, e.ctx, e.batch, &e.prices, &contracts);
+    CHECK(r.status == ParseStatus::Ok);
+    REQUIRE(e.batch.size() == 1);
+    const LiveEvent& ev = e.batch[0];
+    CHECK(ev.feed == FeedId::Okx);
+    CHECK(ev.kind == EventKind::Trade);
+    CHECK(ev.asset == Asset::ETH);
+    CHECK(quote_of(ev) == Asset::USDT);
+    CHECK(near(ev.amount, 2.5));
+    CHECK(near(ev.usd_value, 2.5 * 3010.25));
+    CHECK((ev.flags & kEvBuy) != 0);
+    CHECK(ev.src_hub == 0 && ev.dst_hub == 7);  // USDT home hub -> ETH
+    CHECK_EQ(ev.ts_ms, std::int64_t{1794717615500});
+  }
+  {
+    Fixture f("okx_liquidation.json");
+    REQUIRE(f.ok);
+    e.batch.clear();
+    const ParseResult r = parse_okx(e.parser, f.buf.data(), f.len, e.ctx, e.batch, &e.prices, &contracts);
+    CHECK(r.status == ParseStatus::Ok);
+    CHECK(r.transactions_seen == 3);
+    REQUIRE(e.batch.size() == 2);  // LTC has no known contract size: counted, not valued
+    const LiveEvent& lin = e.batch[0];
+    CHECK(lin.kind == EventKind::Liquidation);
+    CHECK(near(lin.amount, 150 * 0.01));         // 150 contracts x 0.01 BTC
+    CHECK(near(lin.usd_value, 1.5 * 60000.0));
+    CHECK((lin.flags & kEvBuy) == 0);            // sell: a LONG was closed
+    const LiveEvent& inv = e.batch[1];
+    CHECK(near(inv.amount, 30 * 100.0 / 60000.0));  // 30 contracts x 100 USD
+    CHECK(near(inv.usd_value, 3000.0, 1e-6));
+    CHECK((inv.flags & kEvBuy) != 0);            // buy: a SHORT was closed
+  }
+  {
+    Fixture f("okx_error.json");
+    REQUIRE(f.ok);
+    e.batch.clear();
+    CHECK(parse_okx(e.parser, f.buf.data(), f.len, e.ctx, e.batch, &e.prices, &contracts).status ==
+          ParseStatus::RateLimited);
+    Fixture a("okx_sub_ack.json");
+    REQUIRE(a.ok);
+    CHECK(parse_okx(e.parser, a.buf.data(), a.len, e.ctx, e.batch, &e.prices, &contracts).status == ParseStatus::Ok);
+    CHECK(e.batch.size() == 0);
+    const char pong[] = "pong";
+    FeedBuffer pb{64};
+    const std::size_t pl = pb.assign(std::string_view(pong, 4));
+    CHECK(parse_okx(e.parser, pb.data(), pl, e.ctx, e.batch, &e.prices, &contracts).status == ParseStatus::Ok);
+  }
+}

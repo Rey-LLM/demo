@@ -1,0 +1,1 @@
+{"code":"0","msg":"","data":[{"instType":"SWAP","instId":"BTC-USDT-SWAP","ctVal":"0.01","ctValCcy":"BTC","settleCcy":"USDT"},{"instType":"SWAP","instId":"BTC-USD-SWAP","ctVal":"100","ctValCcy":"USD","settleCcy":"BTC"},{"instType":"SWAP","instId":"XRP-USDT-SWAP","ctVal":"100","ctValCcy":"XRP","settleCcy":"USDT"}]}
