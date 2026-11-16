@@ -13,8 +13,14 @@ THIRD_PARTY_NOTICES.md; this script does not download anything.
 Processing, deterministic (same input, same bytes):
   * every polyline is simplified with Douglas-Peucker on the sphere at a
     5 km tolerance (cross-track distance), endpoints kept;
-  * each cable is classified into a corridor from the regions its vertices
-    touch: TRANS_ATLANTIC, TRANS_PACIFIC, EUROPE_ASIA, INTRA_ASIA or OTHER;
+  * features are grouped into cables before classification, because
+    OpenStreetMap splits one cable into many short ways: features with the
+    same name (properties.name or properties.tags.name) form one cable, and
+    two features join when they meet at an endpoint shared by exactly those
+    two ends (a continuation, not a landing station where cables fan out);
+  * each cable (group) is classified into a corridor from the regions its
+    vertices touch: TRANS_ATLANTIC, TRANS_PACIFIC, EUROPE_ASIA, INTRA_ASIA or
+    OTHER; every polyline keeps its own geometry;
   * polylines are sorted by (corridor, first point) for a stable order.
 
 Output layout (little endian), read by src/model/cables.cpp:
@@ -140,6 +146,47 @@ def feature_lines(feature):
     return out
 
 
+def feature_name(feature):
+    props = feature.get("properties") or {}
+    name = props.get("name")
+    if not name and isinstance(props.get("tags"), dict):
+        name = props["tags"].get("name")
+    return name.strip().casefold() if isinstance(name, str) and name.strip() else None
+
+
+def group_features(features):
+    """Union-find over features: same name, or a shared degree-2 endpoint."""
+    parent = list(range(len(features)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    by_name = {}
+    ends = {}
+    for i, (name, lines) in enumerate(features):
+        if name is not None:
+            if name in by_name:
+                union(i, by_name[name])
+            else:
+                by_name[name] = i
+        for line in lines:
+            for lat, lon in (line[0], line[-1]):
+                ends.setdefault((round(lat, 5), round(lon, 5)), []).append(i)
+    for key in sorted(ends):
+        owners = ends[key]
+        if len(owners) == 2:
+            union(owners[0], owners[1])
+    return [find(i) for i in range(len(features))]
+
+
 def main(argv):
     if len(argv) not in (3, 4):
         print(__doc__, file=sys.stderr)
@@ -157,11 +204,18 @@ def main(argv):
 
     polylines = []  # (corridor, line)
     raw_points = 0
+    features = []
     for feat in cables["features"]:
         lines = feature_lines(feat)
-        if not lines:
-            continue
-        corridor = classify(lines)
+        if lines:
+            features.append((feature_name(feat), lines))
+    roots = group_features(features)
+    groups = {}
+    for (_, lines), root in zip(features, roots):
+        groups.setdefault(root, []).extend(lines)
+    group_corridor = {root: classify(lines) for root, lines in groups.items()}
+    for (_, lines), root in zip(features, roots):
+        corridor = group_corridor[root]
         for line in lines:
             raw_points += len(line)
             simplified = douglas_peucker(line, TOLERANCE_KM)
@@ -189,6 +243,7 @@ def main(argv):
     per = [0] * len(CORRIDORS)
     for c, _ in polylines:
         per[c] += 1
+    print("%d features in %d cables; " % (len(features), len(groups)), end="")
     print("%d polylines, %d -> %d points (DP %.0f km), %d landing points; %s" % (
         len(polylines), raw_points, len(points), TOLERANCE_KM, len(landings),
         ", ".join("%s %d" % (CORRIDORS[i], per[i]) for i in range(len(CORRIDORS)))))
