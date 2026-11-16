@@ -128,6 +128,37 @@ ParseResult parse_kraken(JsonParser& p, const char* msg, std::size_t len, const 
 // and bare aggTrade / trade objects from a single-stream connection.
 ParseResult parse_binance(JsonParser& p, const char* msg, std::size_t len, const ParseContext& ctx, EventBatch& out,
                           PriceBook* prices);
+// Binance USD-M futures liquidation stream (wss://fstream.binance.com/ws/!forceOrder@arr):
+// {"e":"forceOrder","E":..,"o":{"s":"BTCUSDT","S":"SELL","q":..,"p":..,"ap":..,"z":..,"T":..}}.
+// "S":"SELL" closes a LONG position, "BUY" a SHORT one. Symbols with a base
+// other than BTC/ETH/SOL are acknowledged (Ok) without an event.
+ParseResult parse_binance_force_order(JsonParser& p, const char* msg, std::size_t len, const ParseContext& ctx,
+                                      EventBatch& out);
+
+// OKX contract specifications for the swaps the OKX feed values (from the
+// public GET /api/v5/public/instruments?instType=SWAP, fetched at connect).
+struct OkxContract {
+  char inst_id[24] = {};
+  Asset base = Asset::Count;
+  Asset quote = Asset::Count;
+  double ct_val = 0.0;     // contract value
+  bool inverse = false;    // ctValCcy is the quote (USD): ct_val is a USD amount
+};
+struct OkxContracts {
+  static constexpr std::size_t kMax = 16;
+  std::array<OkxContract, kMax> items{};
+  std::size_t count = 0;
+  [[nodiscard]] const OkxContract* find(std::string_view instId) const noexcept;
+};
+// Fills `out` with the BTC/ETH/SOL swaps of an instruments response. Ok when at least one was found.
+ParseResult parse_okx_instruments(JsonParser& p, const char* msg, std::size_t len, OkxContracts& out);
+// OKX public WebSocket (wss://ws.okx.com:8443/ws/v5/public): "trades" and
+// "liquidation-orders" channel pushes, subscribe acks, errors and the "pong"
+// keep-alive reply. Liquidations of swaps missing from `contracts` are counted
+// in r.transactions_seen but produce no event (their size is in contracts).
+ParseResult parse_okx(JsonParser& p, const char* msg, std::size_t len, const ParseContext& ctx, EventBatch& out,
+                      PriceBook* prices, const OkxContracts* contracts);
+
 // ECB reference rates via Frankfurter (GET /v1/latest?base=USD&symbols=...):
 // {"amount":1.0,"base":"USD","date":"2026-11-13","rates":{"EUR":0.93,...}}.
 // Fills `board` (USD per unit) and seeds `prices` for currencies that have

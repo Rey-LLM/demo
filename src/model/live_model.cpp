@@ -58,7 +58,7 @@ struct Reader {
 };
 
 constexpr std::uint32_t kStateMagic = 0x4D4C5446u;  // "FTLM"
-constexpr std::uint32_t kStateVersion = 1;
+constexpr std::uint32_t kStateVersion = 2;
 
 }  // namespace
 
@@ -69,6 +69,7 @@ LiveModel::LiveModel(LiveModelConfig cfg) : cfg_(std::move(cfg)) {
   whales_ = std::make_unique<WhaleRecord[]>(std::max<std::size_t>(cfg_.whale_capacity, 1));
   volumes_ = std::make_unique<VolumeRecord[]>(std::max<std::size_t>(cfg_.volume_capacity, 1));
   transitions_ = std::make_unique<FeedTransition[]>(std::max<std::size_t>(cfg_.transition_capacity, 1) * kFeedCount);
+  tape_ = std::make_unique<TapeEntry[]>(kTapeCapacity);
   reset(0);
 }
 
@@ -95,6 +96,10 @@ void LiveModel::reset(std::int64_t sessionStartMs) {
   whale_overflow_ = volume_overflow_ = 0;
   whale_n_ = volume_n_ = 0;
   transition_n_ = {};
+  tape_n_ = 0;
+  tape_floor_ = 0;
+  tape_written_.store(0, std::memory_order_release);
+  liquidations_ = 0;
 }
 
 LiveModel::SecBucket& LiveModel::sec_bucket(std::int64_t second) noexcept {
@@ -167,9 +172,14 @@ void LiveModel::run_corridors(std::int64_t second) noexcept {
   if (!cfg_.fiat_enabled || cfg_.corridors.empty()) return;
   std::uint32_t txs = 0;
   double usd = 0.0;
+  const std::int64_t ms = second * 1000 + 500;
   for (const Corridor& c : cfg_.corridors) {
     if (c.src_hub >= cfg_.hub_count || c.dst_hub >= cfg_.hub_count) continue;
-    const double half = c.usd_per_day / 86400.0 * 0.5;  // even split between the two directions
+    // Session-shaped intensity (MODELED): mean of the two ends' factors.
+    const double k = cfg_.sessions ? 0.5 * (cfg_.sessions->hub_factor(c.src_hub, ms) +
+                                            cfg_.sessions->hub_factor(c.dst_hub, ms))
+                                   : 1.0;
+    const double half = c.usd_per_day / 86400.0 * 0.5 * k;  // even split between the two directions
     for (int dir = 0; dir < 2; ++dir) {
       const std::uint16_t s = dir == 0 ? c.src_hub : c.dst_hub;
       const std::uint16_t d = dir == 0 ? c.dst_hub : c.src_hub;
@@ -269,7 +279,14 @@ bool LiveModel::apply(const LiveEvent& e, std::int64_t nowMs, WhaleRecord* visua
   hub_labels_[s] |= static_cast<std::uint8_t>(1u << L);
   hub_labels_[d] |= static_cast<std::uint8_t>(1u << L);
 
-  const std::uint8_t tier = (e.kind == EventKind::Transaction || e.kind == EventKind::Trade) ? whale_tier(e.feed, usd) : 0;
+  const bool flow = e.kind == EventKind::Transaction || e.kind == EventKind::Trade || e.kind == EventKind::Liquidation;
+  const std::uint8_t tier = flow ? whale_tier(e.feed, usd) : 0;
+  if (e.kind == EventKind::Liquidation) {
+    ++liquidations_;
+    if (tier > 0 || (cfg_.tape_min_usd[F] > 0.0 && usd >= cfg_.tape_min_usd[F])) push_tape(e, usd, tier, s, d);
+  } else if (tier > 0) {
+    push_tape(e, usd, tier, s, d);
+  }
   if (tier == 0) return false;
   const WhaleRecord w{e.ts_ms, usd, e.feed, e.asset, e.label, tier, static_cast<std::uint16_t>(s),
                       static_cast<std::uint16_t>(d)};
@@ -286,6 +303,31 @@ bool LiveModel::apply(const LiveEvent& e, std::int64_t nowMs, WhaleRecord* visua
   return true;
 }
 
+void LiveModel::push_tape(const LiveEvent& e, double usd, std::uint8_t tier, std::size_t s, std::size_t d) noexcept {
+  TapeEntry& t = tape_[tape_n_ % kTapeCapacity];
+  t.ts_ms = e.ts_ms;
+  t.usd_value = usd;
+  t.amount = e.amount;
+  t.price = e.price;
+  t.feed = e.feed;
+  t.kind = e.kind;
+  t.asset = e.asset;
+  t.quote_code = e.quote_code;
+  t.label = e.label;
+  t.tier = tier;
+  t.flags = e.flags;
+  t.src_hub = static_cast<std::uint16_t>(s);
+  t.dst_hub = static_cast<std::uint16_t>(d);
+  for (int i = 0; i < 4; ++i) {
+    t.from_tag[i] = e.from_tag[i];
+    t.to_tag[i] = e.to_tag[i];
+  }
+  t.id_hash = e.id_hash;
+  ++tape_n_;
+  if (tape_n_ > kTapeCapacity && tape_n_ - kTapeCapacity > tape_floor_) tape_floor_ = tape_n_ - kTapeCapacity;
+  if (tape_n_ > tape_written_.load(std::memory_order_relaxed)) tape_written_.store(tape_n_, std::memory_order_release);
+}
+
 void LiveModel::record_transition(FeedId feed, const FeedTransition& t) noexcept {
   const std::size_t f = static_cast<std::size_t>(feed) % kFeedCount;
   if (transition_n_[f] < cfg_.transition_capacity) {
@@ -295,8 +337,11 @@ void LiveModel::record_transition(FeedId feed, const FeedTransition& t) noexcept
 
 void LiveModel::fill_snapshot(LiveSnapshot& o) const noexcept {
   const std::size_t H = cfg_.hub_count;
-  o.tape_count = std::min(whale_n_, LiveSnapshot::kTapeLength);
-  for (std::size_t i = 0; i < o.tape_count; ++i) o.tape[i] = whales_[whale_n_ - 1 - i];
+  o.tape_first = tape_first();
+  o.tape_total = tape_n_;
+  o.liquidations = liquidations_;
+  o.tape_count = static_cast<std::size_t>(std::min<std::uint64_t>(tape_n_ - o.tape_first, LiveSnapshot::kTapeLength));
+  for (std::size_t i = 0; i < o.tape_count; ++i) o.tape[i] = tape_at(tape_n_ - 1 - i);
   o.now_ms = now_ms_;
   o.session_start_ms = session_start_ms_;
   o.hub_count = H;
@@ -417,12 +462,14 @@ void LiveModel::save_state(std::vector<std::uint8_t>& out) const {
   put(out, volume_overflow_);
   put(out, static_cast<std::uint64_t>(whale_n_));
   put(out, static_cast<std::uint64_t>(volume_n_));
+  put(out, tape_n_);
+  put(out, liquidations_);
 }
 
 bool LiveModel::load_state(const std::uint8_t* data, std::size_t size) noexcept {
   Reader r{data, size};
   std::uint32_t magic = 0, version = 0;
-  std::uint64_t hubs = 0, wn = 0, vn = 0;
+  std::uint64_t hubs = 0, wn = 0, vn = 0, tn = 0, liq = 0;
   if (!r.get(magic) || magic != kStateMagic || !r.get(version) || version != kStateVersion || !r.get(hubs) ||
       hubs != cfg_.hub_count) {
     return false;
@@ -433,15 +480,21 @@ bool LiveModel::load_state(const std::uint8_t* data, std::size_t size) noexcept 
             r.get_array(feed_sec_.data(), feed_sec_.size()) && r.get(sess_in_) && r.get(sess_out_) && r.get(sess_tx_) &&
             r.get(sess_whales_) && r.get(hub_labels_) && r.get(feed_events_) && r.get(feed_usd_) &&
             r.get(feed_label_) && r.get(vol_acc_) && r.get(whale_overflow_) && r.get(volume_overflow_) && r.get(wn) &&
-            r.get(vn) && r.left == 0;
-  if (!ok || wn > whale_n_ || vn > volume_n_) return false;
-  truncate_journals(static_cast<std::size_t>(wn), static_cast<std::size_t>(vn));
+            r.get(vn) && r.get(tn) && r.get(liq) && r.left == 0;
+  if (!ok || wn > whale_n_ || vn > volume_n_ || tn > tape_n_) return false;
+  truncate_journals(static_cast<std::size_t>(wn), static_cast<std::size_t>(vn), tn);
+  liquidations_ = liq;
   return true;
 }
 
-void LiveModel::truncate_journals(std::size_t whales, std::size_t volumes) noexcept {
+void LiveModel::truncate_journals(std::size_t whales, std::size_t volumes, std::uint64_t tape) noexcept {
   whale_n_ = std::min(whale_n_, whales);
   volume_n_ = std::min(volume_n_, volumes);
+  // Rows [floor, tape) were not overwritten by anything written after them
+  // (see push_tape), so the truncated window stays valid.
+  tape_n_ = std::min(tape_n_, tape);
+  if (tape_floor_ > tape_n_) tape_floor_ = tape_n_;
+  if (tape_written_.load(std::memory_order_relaxed) > tape_n_) tape_written_.store(tape_n_, std::memory_order_release);
 }
 
 // ---------------------------------------------------------------------------

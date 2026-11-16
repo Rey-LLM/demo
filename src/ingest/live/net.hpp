@@ -28,6 +28,7 @@ enum class NetError : std::uint8_t {
   Closed,         // peer closed the connection
   Protocol,       // malformed frame or response
   TooLarge,       // frame or body over the 8 MB limit
+  GeoBlocked,     // HTTP 451 (or 403 from the venue itself): not available in this region
 };
 const char* net_error_name(NetError e) noexcept;
 

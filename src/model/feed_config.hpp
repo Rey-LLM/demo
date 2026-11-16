@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "ingest/live/endpoint_pool.hpp"
 #include "ingest/live/live_event.hpp"
 #include "model/hub_taxonomy.hpp"
 #include "model/live_model.hpp"
@@ -29,6 +30,13 @@ struct FeedConfig {
   std::uint32_t sample_cap = 32;     // SOL: non-vote transactions kept per block
   double whale_usd = 0.0;
   double poll_s = 900.0;             // FX: seconds between reference-rate requests (>= 60)
+  // ETH, SOL: ordered pool of public endpoints with per-endpoint limits. When
+  // set, it replaces url / rpc_url / max_requests_per_s.
+  std::vector<EndpointConfig> pool;
+  std::string meta_url;              // OKX: public instruments endpoint (contract sizes), fetched at connect
+  std::string ping_text;             // keep-alive text frame (OKX: "ping")
+  double ping_s = 0.0;               // ... sent after this many seconds without a message (0: never)
+  double tape_min_usd = 0.0;         // liquidations at or above this value go on the tape (whales always do)
 };
 
 struct FeedsConfig {

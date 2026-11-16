@@ -84,6 +84,20 @@ bool FeedStateMachine::on_offline(std::int64_t now) noexcept {
   return changed | tick(now);
 }
 
+bool FeedStateMachine::on_geo_blocked(std::int64_t now) noexcept {
+  if (!started_) {
+    started_ = true;
+    down_since_ = now;
+  }
+  bool changed = set(FeedState::GeoBlocked, now);
+  failed_ = false;  // not a failure the capture may stand in for
+  if (replay_) {
+    replay_ = false;
+    changed = true;
+  }
+  return changed;
+}
+
 bool FeedStateMachine::tick(std::int64_t now) noexcept {
   bool changed = false;
   // Stale-feed watchdog: connected but silent.
@@ -92,7 +106,8 @@ bool FeedStateMachine::tick(std::int64_t now) noexcept {
   }
   // Fallback: down (offline or rate limited, reconnect attempts included) for
   // longer than fallback_after_ms_.
-  if (!replay_ && !healthy(state_) && failed_ && now - down_since_ > fallback_after_ms_) {
+  if (!replay_ && !healthy(state_) && state_ != FeedState::GeoBlocked && failed_ &&
+      now - down_since_ > fallback_after_ms_) {
     replay_ = true;
     changed = true;
   }

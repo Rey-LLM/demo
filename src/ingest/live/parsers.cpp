@@ -217,6 +217,16 @@ LiveEvent make_event(FeedId feed, const ParseContext& ctx, EventKind kind, Asset
   return e;
 }
 
+// First two and last two characters of an address (after "0x").
+void address_tag(std::string_view a, char out[4]) noexcept {
+  if (a.size() >= 2 && a[0] == '0' && (a[1] == 'x' || a[1] == 'X')) a.remove_prefix(2);
+  if (a.size() < 4) return;
+  out[0] = a[0];
+  out[1] = a[1];
+  out[2] = a[a.size() - 2];
+  out[3] = a[a.size() - 1];
+}
+
 void value_in_usd(LiveEvent& e, const ParseContext& ctx) noexcept {
   const double px = ctx.prices ? ctx.prices->usd(e.asset) : 0.0;
   if (px > 0.0) {
@@ -244,7 +254,7 @@ ParseResult parse_blockchain_com(JsonParser& p, const char* msg, std::size_t len
   bool haveTx = false;
   LiveEvent e = make_event(FeedId::BtcMempool, ctx, EventKind::Transaction, Asset::BTC);
   e.src_hub = e.dst_hub = ctx.hubs.chain_hub[0];
-  std::uint64_t sat = 0;
+  std::uint64_t sat = 0, biggest = 0;
   for (auto f : root) {
     std::string_view k;
     if (f.unescaped_key().get(k)) return {ParseStatus::Malformed};
@@ -268,16 +278,42 @@ ParseResult parse_blockchain_com(JsonParser& p, const char* msg, std::size_t len
           for (auto o : outs) {
             od::object oo;
             if (o.get_object().get(oo)) return {ParseStatus::Malformed};
+            std::uint64_t v = 0;
+            std::string_view addr;
             for (auto of : oo) {
               std::string_view ok;
               if (of.unescaped_key().get(ok)) return {ParseStatus::Malformed};
               if (ok == "value") {
-                std::uint64_t v = 0;
                 if (!of.value().get_uint64().get(v)) sat += v;
+              } else if (ok == "addr") {
+                ignore(of.value().get_string().get(addr));
               }
+            }
+            if (v >= biggest && !addr.empty()) {  // the recipient shown on the tape: the largest output
+              biggest = v;
+              address_tag(addr, e.to_tag);
             }
           }
           haveTx = true;
+        } else if (gk == "inputs") {
+          od::array ins;
+          if (g.value().get_array().get(ins)) return {ParseStatus::Malformed};
+          for (auto in : ins) {
+            od::object io;
+            if (in.get_object().get(io)) return {ParseStatus::Malformed};
+            for (auto inf : io) {
+              std::string_view ik;
+              if (inf.unescaped_key().get(ik)) return {ParseStatus::Malformed};
+              if (ik != "prev_out" || e.from_tag[0]) continue;
+              od::object po;
+              if (inf.value().get_object().get(po)) continue;
+              for (auto pf : po) {
+                std::string_view pk, a;
+                if (pf.unescaped_key().get(pk)) return {ParseStatus::Malformed};
+                if (pk == "addr" && !pf.value().get_string().get(a)) address_tag(a, e.from_tag);
+              }
+            }
+          }
         }
       }
     }
@@ -386,6 +422,10 @@ ParseResult parse_eth_rpc(JsonParser& p, const char* msg, std::size_t len, const
               if (!tf.value().get_string().get(v)) e.amount = hex_to_double(v) * 1e-18;
             } else if (tk == "hash") {
               if (!tf.value().get_string().get(v)) e.id_hash = fnv1a(v);
+            } else if (tk == "from") {
+              if (!tf.value().get_string().get(v)) address_tag(v, e.from_tag);
+            } else if (tk == "to") {
+              if (!tf.value().get_string().get(v)) address_tag(v, e.to_tag);  // null for contract creation
             }
           }
           value_in_usd(e, ctx);
@@ -664,6 +704,7 @@ void set_price(PriceBook* prices, Asset base, Asset quote, double last, std::int
 
 void finish_trade(LiveEvent& e, Asset base, Asset quote, const ParseContext& ctx, PriceBook* prices) noexcept {
   e.asset = base;
+  set_quote(e, quote);
   if (quote == Asset::USD) {
     e.usd_value = e.amount * e.price;
     if (prices) prices->set(base, e.price, e.ts_ms);
@@ -936,6 +977,287 @@ ParseResult parse_binance(JsonParser& p, const char* msg, std::size_t len, const
 
 // ---------------------------------------------------------------------------
 // ECB reference rates (Frankfurter).
+
+// ---------------------------------------------------------------------------
+// Binance USD-M futures: forceOrder (liquidations)
+// ---------------------------------------------------------------------------
+
+ParseResult parse_binance_force_order(JsonParser& p, const char* msg, std::size_t len, const ParseContext& ctx,
+                                      EventBatch& out) {
+  ParseResult r;
+  od::document doc;
+  od::object root;
+  if (!open(p, msg, len, root, doc)) return {ParseStatus::Malformed};
+  std::string_view ev, symbol, side, message;
+  double qty = 0.0, price = 0.0, avg = 0.0, filled = 0.0;
+  bool haveOrder = false, haveCode = false;
+  std::int64_t tradeMs = 0, code = 0;
+  for (auto f : root) {
+    std::string_view k;
+    if (f.unescaped_key().get(k)) return {ParseStatus::Malformed};
+    if (k == "e") {
+      ignore(f.value().get_string().get(ev));
+    } else if (k == "code") {
+      haveCode = get_int(f.value(), code);
+    } else if (k == "msg") {
+      ignore(f.value().get_string().get(message));
+    } else if (k == "o") {
+      od::object o;
+      if (f.value().get_object().get(o)) return {ParseStatus::Malformed};
+      haveOrder = true;
+      for (auto g : o) {
+        std::string_view gk;
+        if (g.unescaped_key().get(gk)) return {ParseStatus::Malformed};
+        if (gk == "s") {
+          ignore(g.value().get_string().get(symbol));
+        } else if (gk == "S") {
+          ignore(g.value().get_string().get(side));
+        } else if (gk == "q") {
+          get_number(g.value(), qty);
+        } else if (gk == "p") {
+          get_number(g.value(), price);
+        } else if (gk == "ap") {
+          get_number(g.value(), avg);
+        } else if (gk == "z") {
+          get_number(g.value(), filled);
+        } else if (gk == "T") {
+          get_int(g.value(), tradeMs);
+        }
+      }
+    }
+  }
+  if (haveCode) {
+    r.status = (code == 429 || code == -1003 || contains_ci(message, "too many")) ? ParseStatus::RateLimited
+                                                                                    : ParseStatus::Rejected;
+    return r;
+  }
+  if (ev.empty()) return r;
+  if (ev != "forceOrder") return {ParseStatus::Ignored};
+  if (!haveOrder || symbol.empty() || (side != "BUY" && side != "SELL")) return {ParseStatus::Malformed};
+  r.transactions_seen = 1;
+  Asset base, quote;
+  if (!split_concat_pair(symbol, base, quote) || static_cast<std::size_t>(base) >= 3) return r;  // other markets
+  const double q = filled > 0.0 ? filled : qty;
+  const double px = avg > 0.0 ? avg : price;
+  if (!(q > 0.0) || !(px > 0.0)) return {ParseStatus::Malformed};
+  LiveEvent e = make_event(FeedId::BinanceLiq, ctx, EventKind::Liquidation, base);
+  if (tradeMs > 0) e.ts_ms = tradeMs;
+  e.amount = q;
+  e.price = px;
+  const bool buy = side == "BUY";  // the liquidation order bought: a SHORT position was closed
+  if (buy) e.flags |= kEvBuy;
+  trade_hubs(e, base, quote, buy, ctx);
+  finish_trade(e, base, quote, ctx, nullptr);
+  out.push(e);
+  return r;
+}
+
+// ---------------------------------------------------------------------------
+// OKX public WebSocket: trades, liquidation-orders
+// ---------------------------------------------------------------------------
+
+const OkxContract* OkxContracts::find(std::string_view instId) const noexcept {
+  for (std::size_t i = 0; i < count; ++i) {
+    if (instId == std::string_view(items[i].inst_id)) return &items[i];
+  }
+  return nullptr;
+}
+
+namespace {
+// "BTC-USDT-SWAP" -> base BTC, quote USDT. False for anything else.
+bool okx_inst(std::string_view inst, Asset& base, Asset& quote, bool& swap) noexcept {
+  swap = inst.size() > 5 && inst.substr(inst.size() - 5) == "-SWAP";
+  if (swap) inst.remove_suffix(5);
+  return split_pair(inst, base, quote);
+}
+}  // namespace
+
+ParseResult parse_okx_instruments(JsonParser& p, const char* msg, std::size_t len, OkxContracts& out) {
+  od::document doc;
+  od::object root;
+  if (!open(p, msg, len, root, doc)) return {ParseStatus::Malformed};
+  out.count = 0;
+  std::string_view code = "0";
+  for (auto f : root) {
+    std::string_view k;
+    if (f.unescaped_key().get(k)) return {ParseStatus::Malformed};
+    if (k == "code") {
+      ignore(f.value().get_string().get(code));
+    } else if (k == "data") {
+      od::array arr;
+      if (f.value().get_array().get(arr)) return {ParseStatus::Malformed};
+      for (auto it : arr) {
+        od::object o;
+        if (it.get_object().get(o)) return {ParseStatus::Malformed};
+        std::string_view inst, ctValCcy, settle;
+        double ctVal = 0.0;
+        for (auto g : o) {
+          std::string_view gk;
+          if (g.unescaped_key().get(gk)) return {ParseStatus::Malformed};
+          if (gk == "instId") {
+            ignore(g.value().get_string().get(inst));
+          } else if (gk == "ctVal") {
+            get_number(g.value(), ctVal);
+          } else if (gk == "ctValCcy") {
+            ignore(g.value().get_string().get(ctValCcy));
+          }
+        }
+        (void)settle;
+        Asset base, quote;
+        bool swap = false;
+        if (!okx_inst(inst, base, quote, swap) || !swap || static_cast<std::size_t>(base) >= 3 || !(ctVal > 0.0) ||
+            inst.size() >= sizeof(OkxContract::inst_id) || out.count >= OkxContracts::kMax) {
+          continue;
+        }
+        OkxContract& c = out.items[out.count++];
+        c = OkxContract{};
+        inst.copy(c.inst_id, inst.size());
+        c.base = base;
+        c.quote = quote;
+        c.ct_val = ctVal;
+        Asset vc;
+        c.inverse = asset_from_code(ctValCcy, vc) && vc == quote;
+      }
+    }
+  }
+  if (code != "0") return {ParseStatus::Rejected};
+  return {out.count > 0 ? ParseStatus::Ok : ParseStatus::Ignored};
+}
+
+ParseResult parse_okx(JsonParser& p, const char* msg, std::size_t len, const ParseContext& ctx, EventBatch& out,
+                      PriceBook* prices, const OkxContracts* contracts) {
+  ParseResult r;
+  if (len == 4 && std::string_view(msg, 4) == "pong") return r;  // keep-alive reply (plain text)
+  od::document doc;
+  od::object root;
+  if (!open(p, msg, len, root, doc)) return {ParseStatus::Malformed};
+  std::string_view event, channel, code, message;
+  bool haveData = false;
+  for (auto f : root) {
+    std::string_view k;
+    if (f.unescaped_key().get(k)) return {ParseStatus::Malformed};
+    if (k == "event") {
+      ignore(f.value().get_string().get(event));
+    } else if (k == "code") {
+      ignore(f.value().get_string().get(code));
+    } else if (k == "msg") {
+      ignore(f.value().get_string().get(message));
+    } else if (k == "arg") {
+      od::object a;
+      if (f.value().get_object().get(a)) return {ParseStatus::Malformed};
+      for (auto g : a) {
+        std::string_view gk;
+        if (g.unescaped_key().get(gk)) return {ParseStatus::Malformed};
+        if (gk == "channel") ignore(g.value().get_string().get(channel));
+      }
+    } else if (k == "data") {
+      // "arg" precedes "data" in every OKX push.
+      od::array arr;
+      if (f.value().get_array().get(arr)) return {ParseStatus::Malformed};
+      haveData = true;
+      for (auto it : arr) {
+        od::object o;
+        if (it.get_object().get(o)) return {ParseStatus::Malformed};
+        if (channel == "trades") {
+          std::string_view inst, side, tradeId;
+          double px = 0.0, sz = 0.0;
+          std::int64_t ts = 0;
+          for (auto g : o) {
+            std::string_view gk;
+            if (g.unescaped_key().get(gk)) return {ParseStatus::Malformed};
+            if (gk == "instId") {
+              ignore(g.value().get_string().get(inst));
+            } else if (gk == "px") {
+              get_number(g.value(), px);
+            } else if (gk == "sz") {
+              get_number(g.value(), sz);
+            } else if (gk == "side") {
+              ignore(g.value().get_string().get(side));
+            } else if (gk == "ts") {
+              get_int(g.value(), ts);
+            } else if (gk == "tradeId") {
+              ignore(g.value().get_string().get(tradeId));
+            }
+          }
+          Asset base, quote;
+          bool swap = false;
+          if (!okx_inst(inst, base, quote, swap) || swap || static_cast<std::size_t>(base) >= 3 || !(px > 0.0) ||
+              !(sz > 0.0)) {
+            return {ParseStatus::Malformed};
+          }
+          LiveEvent e = make_event(FeedId::Okx, ctx, EventKind::Trade, base);
+          if (ts > 0) e.ts_ms = ts;
+          e.amount = sz;
+          e.price = px;
+          e.id_hash = fnv1a(tradeId);
+          const bool buy = side == "buy";  // OKX "side" is the taker's side
+          if (buy) e.flags |= kEvBuy;
+          trade_hubs(e, base, quote, buy, ctx);
+          finish_trade(e, base, quote, ctx, quote == Asset::USD ? prices : nullptr);
+          if (quote == Asset::USDT && prices && e.usd_value > 0.0 && ctx.recv_ms - prices->updated_ms(base) > 120000) {
+            prices->set(base, e.usd_value / e.amount, e.ts_ms);
+          }
+          out.push(e);
+        } else if (channel == "liquidation-orders") {
+          std::string_view inst;
+          for (auto g : o) {
+            std::string_view gk;
+            if (g.unescaped_key().get(gk)) return {ParseStatus::Malformed};
+            if (gk == "instId") {
+              ignore(g.value().get_string().get(inst));
+            } else if (gk == "details") {
+              od::array det;
+              if (g.value().get_array().get(det)) return {ParseStatus::Malformed};
+              const OkxContract* c = contracts ? contracts->find(inst) : nullptr;
+              for (auto d : det) {
+                od::object dobj;
+                if (d.get_object().get(dobj)) return {ParseStatus::Malformed};
+                std::string_view side;
+                double bkPx = 0.0, sz = 0.0;
+                std::int64_t ts = 0;
+                for (auto h : dobj) {
+                  std::string_view hk;
+                  if (h.unescaped_key().get(hk)) return {ParseStatus::Malformed};
+                  if (hk == "side") {
+                    ignore(h.value().get_string().get(side));
+                  } else if (hk == "bkPx") {
+                    get_number(h.value(), bkPx);
+                  } else if (hk == "sz") {
+                    get_number(h.value(), sz);
+                  } else if (hk == "ts") {
+                    get_int(h.value(), ts);
+                  }
+                }
+                ++r.transactions_seen;
+                if (!c || !(bkPx > 0.0) || !(sz > 0.0)) continue;  // unknown contract size: not valued
+                LiveEvent e = make_event(FeedId::Okx, ctx, EventKind::Liquidation, c->base);
+                if (ts > 0) e.ts_ms = ts;
+                e.price = bkPx;
+                // Linear swaps: contracts x ctVal base units. Inverse (coin-
+                // margined) swaps: ctVal is in the quote currency.
+                e.amount = c->inverse ? sz * c->ct_val / bkPx : sz * c->ct_val;
+                const bool buy = side == "buy";  // the liquidation order bought: a SHORT was closed
+                if (buy) e.flags |= kEvBuy;
+                trade_hubs(e, c->base, c->quote, buy, ctx);
+                finish_trade(e, c->base, c->quote, ctx, nullptr);
+                out.push(e);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  if (event == "error") {
+    r.status = (code == "50011" || code == "60014" || contains_ci(message, "too many")) ? ParseStatus::RateLimited
+                                                                                        : ParseStatus::Rejected;
+    return r;
+  }
+  if (!event.empty()) return r;  // subscribe ack, notice
+  if (!haveData) return {ParseStatus::Ignored};
+  if (channel != "trades" && channel != "liquidation-orders") return {ParseStatus::Ignored};
+  return r;
+}
 
 ParseResult parse_ecb_rates(JsonParser& p, const char* msg, std::size_t len, const ParseContext& ctx,
                             PriceBook* prices, FxBoard* board) {

@@ -212,6 +212,7 @@ set(FTVIZ_EMBEDDED_FILES
   config/render.json
   config/theme.json
   config/feeds.json
+  config/sessions.json
   config/flows_baseline.csv
   assets/coastlines_110m.bin
   assets/coastlines_50m.bin
@@ -269,7 +270,12 @@ add_library(ftviz_model STATIC
   src/model/whales.cpp
   src/model/live_model.cpp
   src/model/feed_config.cpp
-  src/model/capture.cpp)
+  src/model/capture.cpp
+  src/model/solar.cpp
+  src/model/sessions.cpp
+  src/model/cables.cpp
+  src/ingest/live/endpoint_pool.cpp
+  src/ui/command_bar.cpp)
 ftviz_target_defaults(ftviz_model)
 target_link_libraries(ftviz_model PUBLIC ftviz_ingest ftviz_glm)
 

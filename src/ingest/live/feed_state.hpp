@@ -9,6 +9,10 @@
 //   any --connect or socket failure--> OFFLINE (reconnect after backoff)
 //   OFFLINE or RATE_LIMITED for > fallback_after_ms (15 s) --> replay active
 //   replay active --a valid live message again--> LIVE, replay stops
+//   any --HTTP 451, or 403 / a documented region error on every URL-->
+//       GEO_BLOCKED: the venue refuses this region. The feed is shown as
+//       GEO_BLOCKED and left out: no REPLAY stands in for it (that would
+//       present a venue this machine cannot see), and it re-checks rarely.
 //
 // "Replay active" is orthogonal to the connection state: the adapter keeps
 // reconnecting while the bundled capture stands in for the feed, and the HUD
@@ -20,8 +24,9 @@
 
 namespace ftv {
 
-enum class FeedState : std::uint8_t { Connecting = 0, Live, Degraded, RateLimited, Offline, Count };
-inline constexpr const char* kFeedStateNames[] = {"CONNECTING", "LIVE", "DEGRADED", "RATE_LIMITED", "OFFLINE"};
+enum class FeedState : std::uint8_t { Connecting = 0, Live, Degraded, RateLimited, Offline, GeoBlocked, Count };
+inline constexpr const char* kFeedStateNames[] = {"CONNECTING", "LIVE",    "DEGRADED",
+                                                  "RATE_LIMITED", "OFFLINE", "GEO_BLOCKED"};
 
 // Exponential backoff with full jitter: attempt n waits a uniform random time
 // in [0, min(cap, base * 2^n)]. base 0.5 s, cap 30 s by default.
@@ -59,6 +64,7 @@ class FeedStateMachine {
   bool on_degraded(std::int64_t now) noexcept;         // parse errors, rejected method
   bool on_rate_limited(std::int64_t now) noexcept;     // 429 or a rate-limit error
   bool on_offline(std::int64_t now) noexcept;          // connect or socket failure
+  bool on_geo_blocked(std::int64_t now) noexcept;      // the venue refuses this region (451 / 403)
   // Watchdog and fallback timers; call periodically (e.g. 4 Hz).
   bool tick(std::int64_t now) noexcept;
 

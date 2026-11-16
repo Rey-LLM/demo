@@ -86,6 +86,7 @@ const char* net_error_name(NetError e) noexcept {
     case NetError::Closed: return "closed";
     case NetError::Protocol: return "protocol";
     case NetError::TooLarge: return "too large";
+    case NetError::GeoBlocked: return "region restricted (http 451/403)";
   }
   return "?";
 }
@@ -557,6 +558,14 @@ NetError WebSocket::open(const Url& url, int timeoutMs, std::string& detail) {
     stream_.close();
     return NetError::RateLimited;
   }
+  if (status == 451 || status == 403) {
+    // 451 Unavailable For Legal Reasons is how Binance refuses restricted
+    // regions; a 403 on the upgrade comes from the venue (a proxy refusal
+    // fails earlier, at CONNECT). The adapter decides after trying every URL.
+    detail = "http " + std::to_string(status) + " on upgrade";
+    stream_.close();
+    return NetError::GeoBlocked;
+  }
   if (status != 101 || header_value(head, "Sec-WebSocket-Accept") != ws_accept(key)) {
     detail = "upgrade refused (http " + std::to_string(status) + ")";
     stream_.close();
@@ -789,6 +798,10 @@ NetError HttpsClient::request(bool post, const Url& url, std::string_view body, 
     }
     if (lower(header_value(head, "Connection")) == "close") stream_.close();
     if (status == 429) return NetError::RateLimited;
+    if (status == 451) {
+      detail = "http 451";
+      return NetError::GeoBlocked;
+    }
     if (status < 200 || status >= 300) {
       detail = "http " + std::to_string(status);
       return NetError::HttpStatus;

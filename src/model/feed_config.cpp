@@ -125,10 +125,42 @@ std::optional<FeedsConfig> load_feeds_config(const std::string& path, const HubT
       fc.slot_lag = static_cast<std::uint32_t>(std::clamp(f.number_or("slot_lag", 32.0), 0.0, 10000.0));
       fc.sample_cap = static_cast<std::uint32_t>(std::clamp(f.number_or("sample_cap", 32.0), 1.0, 4096.0));
       fc.whale_usd = std::max(0.0, f.number_or("whale_usd", 0.0));
+      fc.meta_url = f.string_or("meta_url", "");
+      fc.ping_text = f.string_or("ping", "");
+      fc.ping_s = std::clamp(f.number_or("ping_s", 0.0), 0.0, 600.0);
+      fc.tape_min_usd = std::max(0.0, f.number_or("tape_min_usd", 0.0));
+      if (const JsonValue* pool = f.find("pool"); pool && pool->is_array()) {
+        for (const JsonValue& e : pool->items()) {
+          EndpointConfig ep;
+          ep.url = e.string_or("url", "");
+          ep.rpc_url = e.string_or("rpc_url", "");
+          // Our budget never exceeds 5 req/s per endpoint, whatever the provider allows.
+          ep.max_rps = std::clamp(e.number_or("max_requests_per_s", 1.0), 0.05, 5.0);
+          ep.burst = std::clamp(e.number_or("burst", 1.0), 1.0, 10.0);
+          ep.limit_note = e.string_or("limit", "");
+          ep.limit_source = e.string_or("limit_source", "");
+          ep.as_of = e.string_or("as_of", "");
+          ep.pending_tx = e.bool_or("pending_tx", false);
+          if (ep.url.empty() || ep.limit_source.empty() || ep.as_of.empty()) {
+            error = path + ": feed " + id + ": every pool endpoint needs url, limit_source and as_of";
+            return std::nullopt;
+          }
+          fc.pool.push_back(std::move(ep));
+        }
+        if (fc.pool.size() > EndpointPool::kMaxEndpoints) {
+          error = path + ": feed " + id + ": at most 8 pool endpoints";
+          return std::nullopt;
+        }
+        if (fc.url.empty() && !fc.pool.empty()) fc.url = fc.pool.front().url;
+      }
       // TLS is mandatory: wss:// for streams, https:// for the FX poller and rpc_url.
       const char* scheme = idx == static_cast<std::size_t>(FeedId::Fx) ? "https://" : "wss://";
-      bool tlsOk = fc.url.rfind(scheme, 0) == 0 && (fc.rpc_url.empty() || fc.rpc_url.rfind("https://", 0) == 0);
+      bool tlsOk = fc.url.rfind(scheme, 0) == 0 && (fc.rpc_url.empty() || fc.rpc_url.rfind("https://", 0) == 0) &&
+                   (fc.meta_url.empty() || fc.meta_url.rfind("https://", 0) == 0);
       for (const std::string& u : fc.fallback_urls) tlsOk = tlsOk && u.rfind(scheme, 0) == 0;
+      for (const EndpointConfig& ep : fc.pool) {
+        tlsOk = tlsOk && ep.url.rfind("wss://", 0) == 0 && (ep.rpc_url.empty() || ep.rpc_url.rfind("https://", 0) == 0);
+      }
       if (!tlsOk) {
         error = path + ": feed " + id + " must use " + scheme + " URLs (and https:// for rpc_url): TLS is mandatory";
         return std::nullopt;
@@ -153,6 +185,7 @@ LiveModelConfig make_model_config(const FeedsConfig& feeds, const HubTaxonomy& t
   m.fiat_enabled = feeds.fiat_enabled;
   m.trail_min_usd = feeds.trail_min_usd;
   m.trail_max_per_s = feeds.trail_max_per_s;
+  for (std::size_t i = 0; i < kFeedCount; ++i) m.tape_min_usd[i] = feeds.feeds[i].tape_min_usd;
   return m;
 }
 
@@ -169,6 +202,18 @@ std::uint64_t model_config_hash(const LiveModelConfig& cfg) noexcept {
     XXH3_64bits_update(&st, &c.src_hub, sizeof(c.src_hub));
     XXH3_64bits_update(&st, &c.dst_hub, sizeof(c.dst_hub));
     XXH3_64bits_update(&st, &c.usd_per_day, sizeof(c.usd_per_day));
+  }
+  XXH3_64bits_update(&st, cfg.tape_min_usd.data(), sizeof(double) * cfg.tape_min_usd.size());
+  if (cfg.sessions) {
+    // Session hours, holidays, zones and factors shape the corridor volumes.
+    XXH3_64bits_update(&st, cfg.sessions->intensity.data(), sizeof(double) * cfg.sessions->intensity.size());
+    for (const ExchangeSession& e : cfg.sessions->exchanges()) {
+      XXH3_64bits_update(&st, e.tz.data(), e.tz.size());
+      XXH3_64bits_update(&st, &e.hub, sizeof(e.hub));
+      const std::int32_t mins[5] = {e.pre_open, e.open, e.close, e.lunch_begin, e.lunch_end};
+      XXH3_64bits_update(&st, mins, sizeof(mins));
+      XXH3_64bits_update(&st, e.holidays.data(), e.holidays.size() * sizeof(std::int32_t));
+    }
   }
   return XXH3_64bits_digest(&st);
 }

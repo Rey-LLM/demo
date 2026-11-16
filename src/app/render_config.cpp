@@ -96,12 +96,29 @@ std::optional<RenderSettings> load_render_settings(const std::string& path, std:
   return render_settings_from_json(*root);
 }
 
+// The locked palette: a theme may only use these tokens (v4).
+//   Obsidian #050608, Amber #C8962E, Ink #D9DCE1, Neon Gold #FFC23D,
+//   Night Lights #E8A54B, Day Tint #0B0E13.
+bool palette_token(std::string hex) {
+  for (char& c : hex) c = static_cast<char>(c >= 'a' && c <= 'f' ? c - 32 : c);
+  static constexpr const char* kTokens[] = {"#050608", "#C8962E", "#D9DCE1", "#FFC23D", "#E8A54B", "#0B0E13"};
+  for (const char* t : kTokens) {
+    if (hex == t) return true;
+  }
+  return false;
+}
+
 std::optional<Theme> theme_from_json(const JsonValue& root, std::string& error) {
   Theme t;
   auto color = [&](const JsonValue* obj, const char* key, float (&out)[3], const char* what) {
     const std::string hex = obj ? obj->string_or(key, "") : std::string();
     if (!parse_hex_color(hex, out)) {
       error = std::string("theme: ") + what + " needs a \"#RRGGBB\" colour";
+      return false;
+    }
+    if (!palette_token(hex)) {
+      error = std::string("theme: ") + what + " " + hex +
+              " is not a palette token (Obsidian, Amber, Ink, Neon Gold, Night Lights, Day Tint)";
       return false;
     }
     return true;
@@ -151,19 +168,25 @@ std::optional<Theme> theme_from_json(const JsonValue& root, std::string& error) 
 
   {
     const JsonValue* coast = root.find("coastline");
-    float base[3], toward[3];
-    if (!color(coast, "color", base, "coastline") || !color(coast, "blend_toward", toward, "coastline.blend_toward")) {
-      return std::nullopt;
-    }
-    const float k = num(*coast, "blend", 0.45f, 0.0f, 1.0f);
-    for (int i = 0; i < 3; ++i) t.coast[i] = base[i] + (toward[i] - base[i]) * k;
+    if (!color(coast, "color", t.coast, "coastline")) return std::nullopt;
     t.coast_alpha = num(*coast, "alpha", t.coast_alpha, 0.18f, 0.28f);
+    t.coast_night = num(*coast, "night_factor", t.coast_night, 0.0f, 1.0f);
     t.coast_close_altitude = num(*coast, "close_zoom_altitude", t.coast_close_altitude, 0.0f, 1e6f);
     const JsonValue* atmo = root.find("atmosphere");
     if (!color(atmo, "color", t.atmo, "atmosphere")) return std::nullopt;
     t.atmo_alpha = num(*atmo, "alpha", t.atmo_alpha, 0.0f, 0.22f);
     t.atmo_exponent = num(*atmo, "exponent", t.atmo_exponent, 4.0f, 6.0f);
     t.atmo_scale = num(*atmo, "scale", t.atmo_scale, 1.001f, 1.05f);
+  }
+
+  {
+    const JsonValue* earth = root.find("earth");
+    if (!color(earth, "day_tint", t.day_tint, "earth.day_tint")) return std::nullopt;
+    if (!color(earth, "night_lights", t.night_lights, "earth.night_lights")) return std::nullopt;
+    t.night_lights_max = num(*earth, "night_lights_max", t.night_lights_max, 0.0f, 1.5f);  // never beyond 1.5
+    t.twilight = num(*earth, "twilight", t.twilight, 0.01f, 0.5f);
+    t.cable_alpha = num(*earth, "cable_alpha", t.cable_alpha, 0.10f, 0.16f);
+    t.rim_twilight = num(*earth, "rim_twilight", t.rim_twilight, 0.0f, 1.0f);
   }
 
   if (const JsonValue* post = root.find("post")) {

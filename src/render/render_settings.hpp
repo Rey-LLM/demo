@@ -15,8 +15,15 @@ struct Theme {
   float background[3] = {0.0f, 0.0f, 0.0f};  // "Obsidian"   #050608
   float graticule[3] = {0.0f, 0.0f, 0.0f};   // "Amber Line" #C8962E
   float ink[3] = {0.0f, 0.0f, 0.0f};         // nodes, arcs, labels #D9DCE1
-  float whale[3] = {0.0f, 0.0f, 0.0f};       // "Deep Amber" #FF9A1F: tier-1 whale emissive
-  float whale_hot[3] = {0.0f, 0.0f, 0.0f};   // "White Gold" #FFF1C9: tier-3 whales and every arc head
+  float whale[3] = {0.0f, 0.0f, 0.0f};       // "Neon Gold" #FFC23D: whales and liquidations only (emissive)
+  float whale_hot[3] = {0.0f, 0.0f, 0.0f};   // arc heads (theme "color_hot"; v4: Neon Gold as well)
+  float day_tint[3] = {0.0f, 0.0f, 0.0f};    // "Day Tint" #0B0E13: day-hemisphere base
+  float night_lights[3] = {0.0f, 0.0f, 0.0f};  // "Night Lights" #E8A54B: city lights
+  float night_lights_max = 1.5f;             // HDR intensity cap (never blooms beyond 1.5)
+  float twilight = 0.10f;                    // day factor = smoothstep(-t, t, N.sun)
+  float coast_night = 0.5f;                  // coastline alpha factor on the night side
+  float cable_alpha = 0.12f;                 // submarine cables, Amber 0.10 .. 0.16
+  float rim_twilight = 0.35f;                // warm twilight tint on the rim (fraction of the rim alpha)
   float graticule_alpha = 0.08f;             // 0.06 .. 0.10
   float graticule_spacing_deg = 15.0f;
   float node_alpha_min = 0.04f;
@@ -34,7 +41,7 @@ struct Theme {
   float label_alpha = 0.65f;
   float label_px = 11.0f;
   float label_tracking_em = 0.14f;
-  float coast[3] = {0.0f, 0.0f, 0.0f};       // amber blended toward graphite #3A3328 (linear)
+  float coast[3] = {0.0f, 0.0f, 0.0f};       // Amber (linear)
   float coast_alpha = 0.22f;                 // 0.18 .. 0.28
   float coast_close_altitude = 1400.0f;      // 1:50m below this camera altitude, 1:110m above
   float atmo[3] = {0.0f, 0.0f, 0.0f};        // amber rim (linear)

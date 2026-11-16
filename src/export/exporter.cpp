@@ -318,7 +318,7 @@ std::string export_session_json(const ExportInput& in) {
       o += "\"at_utc\": ";
       append_json_string(o, iso8601_ms(t.at_ms));
       o += ", \"state\": ";
-      append_json_string(o, kFeedStateNames[static_cast<std::size_t>(t.state) % 5]);
+      append_json_string(o, kFeedStateNames[static_cast<std::size_t>(t.state) % 6]);
       o += ", \"label\": ";
       append_json_string(o, t.replay ? "REPLAY" : label_name(f.configured_label));
       o += "}";

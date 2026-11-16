@@ -55,7 +55,9 @@
     { "id": "BLOCKCHAIN_SOL",  "display_name": "Solana",   "type": "CHAIN_CLOUD", "chain": "SOL",  "radius": 160, "lat": -22.0, "lon": 72.0, "footprint_deg": 3.5, "k_anchor": 0.02 },
     { "id": "BLOCKCHAIN_TRON", "display_name": "Tron",     "type": "CHAIN_CLOUD", "chain": "TRON", "radius": 150, "lat": -28.0, "lon": -18.0, "footprint_deg": 3.5, "k_anchor": 0.02 },
 
-    { "id": "OFFSHORE_UNRESOLVED", "display_name": "Offshore / unresolved", "type": "FALLBACK", "radius": 170, "lat": -34.0, "lon": -118.0, "footprint_deg": 3.5, "k_anchor": 0.02 }
+    { "id": "OFFSHORE_UNRESOLVED", "display_name": "Offshore / unresolved", "type": "FALLBACK", "radius": 170, "lat": -34.0, "lon": -118.0, "footprint_deg": 3.5, "k_anchor": 0.02 },
+
+    { "id": "SHANGHAI",   "display_name": "Shanghai",   "type": "FIAT_CENTER", "radius": 150, "lat": 31.23, "lon": 121.47, "footprint_deg": 1.6, "label_side": "north", "k_anchor": 0.02 }
   ],
 
   // Jurisdiction -> hub. Unlisted or empty jurisdictions fall back to

@@ -27,6 +27,7 @@ LiveFeeds::LiveFeeds(const FeedsConfig& cfg, const FeedHubs& hubs, std::size_t r
     c.status = &status_[i];
     c.all_status = &status_;
     c.fx = &fx_;
+    c.rotations = &rotations_;
   }
 }
 

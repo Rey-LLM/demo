@@ -15,7 +15,9 @@
 #include "core/fixed_text.hpp"
 #include "ingest/live/live_runtime.hpp"
 #include "model/hub_taxonomy.hpp"
+#include "model/sessions.hpp"
 #include "render/hud.hpp"
+#include "ui/command_bar.hpp"
 
 namespace ftv {
 
@@ -35,6 +37,11 @@ struct LiveHudLayout {
   float feeds_x = 0, feeds_y = 0;
   float panel_right = 0, panel_y = 0;
   float toast_y = 0;
+  // Whale & liquidation tape: right-hand column, bottom-anchored.
+  float tape_right = 0, tape_y = 0;  // y of the header line
+  float tape_row_h = 0;
+  // Command bar: centred near the top.
+  float bar_x = 0, bar_y = 0, bar_w = 0;
 };
 
 struct LiveHudInput {
@@ -47,6 +54,23 @@ struct LiveHudInput {
   bool show_feeds = true;
   std::string_view toast;  // empty: none
   bool toast_ok = true;
+  // v4
+  const TapeFilter* filter = nullptr;      // tape (and arc) filter
+  const CommandBar* bar = nullptr;         // drawn when open
+  const SessionCalendar* sessions = nullptr;
+  std::int64_t sun_ms = 0;                 // time the terminator is drawn for
+  bool sun_override = false;               // --sun-time
+  double subsolar_lat = 0.0, subsolar_lon = 0.0;
+  bool routes_drawn = false;               // inter-hub arcs follow MODELED cable routes
+  double now_s = 0.0;                      // render clock (scroll smoothing, caret blink)
+};
+
+// What a click on a tape row focuses.
+struct TapeHit {
+  bool valid = false;
+  std::uint16_t hub = 0;          // hub to fly to / pin
+  std::uint64_t id_hash = 0;
+  char from_tag[4] = {}, to_tag[4] = {};
 };
 
 class LiveHud {
@@ -59,6 +83,12 @@ class LiveHud {
 
   void refresh(const LiveSnapshot& snap, const LiveHudInput& in) noexcept;
   void emit(HudRenderer& hud, const LiveHudLayout& l, const LiveHudInput& in) const noexcept;
+
+  // Tape row under (x, y), if any; filter chip under (x, y) (FilterKind::Count: none).
+  [[nodiscard]] TapeHit tape_hit(const LiveHudLayout& l, double x, double y) const noexcept;
+  [[nodiscard]] FilterKind chip_hit(const LiveHudLayout& l, double x, double y) const noexcept;
+  [[nodiscard]] std::size_t session_lines() const noexcept { return session_lines_; }
+  [[nodiscard]] std::string_view session_line(std::size_t i) const noexcept { return sessions_[i].view(); }
 
   // Text of feed row `f` (tests / console report).
   [[nodiscard]] std::string_view feed_row(std::size_t f) const noexcept { return rows_[f].text.view(); }
@@ -76,13 +106,25 @@ class LiveHud {
   const LiveFeeds* feeds_;
   const FeedsConfig* config_;
   struct TapeLine {
-    FixedText<96> text;
-    std::uint8_t tier = 1;
+    FixedText<8> marker;   // "WHALE T2" / "LIQ" (Neon Gold)
+    FixedText<96> head;    // "14:02:11  OKX  "
+    FixedText<96> tail;    // "  BTC-USDT  SHORT  $3.4M"
+    FixedText<96> text;    // head + marker + tail (tests, console)
+    TapeHit hit;
   };
   std::array<Row, kFeedCount> rows_{};
   FixedText<96> summary_;
-  std::array<TapeLine, LiveSnapshot::kTapeLength> tape_{};
+  static constexpr std::size_t kTapeRows = 12;
+  std::array<TapeLine, kTapeRows> tape_{};
   std::size_t tape_lines_ = 0;
+  std::uint64_t tape_newest_ = 0;      // id of the newest row shown (scroll smoothing)
+  double scroll_start_s_ = -10.0;
+  FixedText<64> tape_header_;
+  std::array<FixedText<24>, static_cast<std::size_t>(FilterKind::Count)> chips_{};
+  std::array<FixedText<64>, 8> sessions_{};
+  std::array<std::uint8_t, 8> session_state_{};
+  std::size_t session_lines_ = 0;
+  FixedText<96> sun_line_;
   std::array<FixedText<96>, 12> panel_{};
   std::size_t panel_lines_ = 0;
   FixedText<96> timeline_text_;

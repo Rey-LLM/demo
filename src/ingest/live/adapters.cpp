@@ -15,11 +15,24 @@
 //
 // FX is not a stream: it GETs the ECB reference rates every poll_s seconds.
 //
+// ETH and SOL use an endpoint pool (endpoint_pool.hpp): the active endpoint's
+// token bucket gates every follow-up request; a connect failure, timeout or
+// 429 cools that endpoint down and rotates to the next healthy one. Rotations
+// are logged (RotationLog) for the HUD and the export.
+//
+// GEO_BLOCKED: when every URL of a feed answered 451 (or 403 at the upgrade),
+// the venue refuses this region. The feed is marked GEO_BLOCKED, gets no
+// REPLAY stand-in, and is re-checked every 10 minutes.
+//
+// OKX: contract sizes are fetched from the public instruments endpoint before
+// the WebSocket opens; a "ping" text frame keeps the connection alive.
+//
 // Replay fallback policy (feeds.json "fallback_policy"): by default the
 // capture stands in for a feed only while no feed at all is LIVE, i.e. the
 // machine is offline; "per_feed" restores the v2 behaviour.
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <string>
@@ -65,8 +78,9 @@ class Adapter {
                  c.all->backoff_base_s, c.all->backoff_cap_s),
         ws_(c.all->max_frame_bytes),
         buf_(c.all->max_frame_bytes),
-        http_buf_(id_ == FeedId::Sol ? c.all->max_frame_bytes : id_ == FeedId::Fx ? 65536 : 16),
-        limiter_(c.cfg->max_requests_per_s) {
+        http_buf_(id_ == FeedId::Sol || id_ == FeedId::Okx ? c.all->max_frame_bytes : id_ == FeedId::Fx ? 65536 : 16),
+        limiter_(c.cfg->max_requests_per_s),
+        pool_(c.cfg->pool) {
     ctx_.prices = c.prices;
     ctx_.hubs = c.hubs;
     ctx_.label = c.cfg->label;
@@ -74,9 +88,14 @@ class Adapter {
   }
 
   void run() {
-    // The primary URL, then the fallbacks.
-    urls_.push_back(c_.cfg->url);
-    for (const std::string& u : c_.cfg->fallback_urls) urls_.push_back(u);
+    // The primary URL, then the fallbacks; or the pool's endpoints in order.
+    if (pool_.size() > 0) {
+      for (std::size_t i = 0; i < pool_.size(); ++i) urls_.push_back(pool_.endpoint(i).url);
+    } else {
+      urls_.push_back(c_.cfg->url);
+      for (const std::string& u : c_.cfg->fallback_urls) urls_.push_back(u);
+    }
+    c_.status->url_count.store(static_cast<std::uint8_t>(urls_.size()), std::memory_order_relaxed);
     for (const std::string& u : urls_) {
       net::Url parsed;
       if (!net::parse_url(u, parsed)) {
@@ -87,20 +106,37 @@ class Adapter {
       }
       parsed_.push_back(parsed);
     }
-    if (id_ == FeedId::Sol) net::parse_url(c_.cfg->rpc_url, rpc_url_);
+    if (id_ == FeedId::Sol && pool_.size() == 0) net::parse_url(c_.cfg->rpc_url, rpc_url_);
     if (id_ == FeedId::Fx) {
       run_poller();
       return;
     }
     while (!st_.stop_requested()) {
       note(sm_.on_connecting(utc_now_ms()));
+      if (pool_.size() > 0) select_pool_endpoint();
+      if (!c_.cfg->meta_url.empty() && !fetch_meta()) continue;
       std::string detail;
+      const std::int64_t t0 = utc_now_ms();
       const net::NetError err = ws_.open(parsed_[url_index_], 10000, detail);
       if (err != net::NetError::None) {
-        next_url();
+        if (err == net::NetError::GeoBlocked) {
+          if (++geo_refusals_ >= urls_.size()) {
+            geo_blocked(detail);
+            continue;
+          }
+        } else {
+          geo_refusals_ = 0;
+        }
+        if (pool_.size() > 0) {
+          pool_failure(err == net::NetError::RateLimited);
+        } else {
+          next_url();
+        }
         fail(err, detail);
         continue;
       }
+      geo_refusals_ = 0;
+      if (pool_.size() > 0) pool_.on_success(utc_now_ms(), static_cast<double>(utc_now_ms() - t0));
       if (!subscribe()) {
         fail(net::NetError::Closed, "subscribe failed");
         continue;
@@ -118,6 +154,78 @@ class Adapter {
     url_index_ = (url_index_ + 1) % parsed_.size();
     c_.status->url_index.store(static_cast<std::uint8_t>(url_index_), std::memory_order_relaxed);
     FTV_LOG_INFO("[live] %s: trying %s", feed_name(id_).data(), urls_[url_index_].c_str());
+  }
+
+  // Pool: point url_index_ / rpc_url_ at the active endpoint.
+  void select_pool_endpoint() {
+    url_index_ = pool_.active();
+    c_.status->url_index.store(static_cast<std::uint8_t>(url_index_), std::memory_order_relaxed);
+    rpc_url_ = net::Url{};
+    const std::string& rpc = pool_.current().rpc_url;
+    if (!rpc.empty()) net::parse_url(rpc, rpc_url_);
+    pending_ok_ = pool_.current().pending_tx;
+    const std::int64_t wait = pool_.wait_ms(utc_now_ms());
+    if (wait > 0) wait_ms(wait);  // every endpoint is cooling down: wait for the first one
+  }
+
+  // Pool: a provider-side failure on the active endpoint.
+  void pool_failure(bool rateLimited) {
+    const std::int64_t now = utc_now_ms();
+    const std::size_t from = pool_.active();
+    const std::size_t to = rateLimited ? pool_.on_rate_limited(now) : pool_.on_error(now);
+    c_.status->rotations.fetch_add(1, std::memory_order_relaxed);
+    if (c_.rotations) {
+      RotationRecord rec;
+      rec.at_ms = now;
+      rec.feed = id_;
+      rec.from = static_cast<std::uint8_t>(from);
+      rec.to = static_cast<std::uint8_t>(to);
+      rec.reason = rateLimited ? RotationReason::RateLimited : RotationReason::Error;
+      c_.rotations->push(rec);
+    }
+    FTV_LOG_INFO("[live] %s: endpoint %zu -> %zu (%s): %s", feed_name(id_).data(), from, to,
+                 rateLimited ? "rate limited" : "error", urls_[to].c_str());
+  }
+
+  void geo_blocked(const std::string& detail) {
+    c_.status->last_error.store(static_cast<std::uint8_t>(net::NetError::GeoBlocked), std::memory_order_relaxed);
+    note(sm_.on_geo_blocked(utc_now_ms()));
+    FTV_LOG_WARN("[live] %s: GEO_BLOCKED (%s on every URL); continuing without it, re-check in 10 min",
+                 feed_name(id_).data(), detail.c_str());
+    ws_.close();
+    geo_refusals_ = 0;
+    const auto until = std::chrono::steady_clock::now() + std::chrono::minutes(10);
+    while (!st_.stop_requested() && std::chrono::steady_clock::now() < until) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+  }
+
+  // OKX: contract sizes from the public instruments endpoint (once per connection attempt
+  // until it succeeds; kept afterwards).
+  bool fetch_meta() {
+    if (okx_contracts_.count > 0) return true;
+    net::Url u;
+    if (!net::parse_url(c_.cfg->meta_url, u)) return true;
+    std::size_t len = 0;
+    int status = 0;
+    std::string detail;
+    const net::NetError e = http_.get(u, http_buf_.data(), http_buf_.capacity(), len, status, 15000, detail);
+    http_.close();
+    if (e != net::NetError::None) {
+      if (e == net::NetError::GeoBlocked) {
+        geo_blocked(detail);
+      } else {
+        fail(e, "instruments: " + detail);
+      }
+      return false;
+    }
+    http_buf_.data()[len] = '\0';
+    const ParseResult r = parse_okx_instruments(parser_, http_buf_.data(), len, okx_contracts_);
+    if (r.status != ParseStatus::Ok) {
+      // Trades still flow; liquidations stay unvalued (counted, no events).
+      FTV_LOG_WARN("[live] %s: no contract sizes from the instruments endpoint", feed_name(id_).data());
+    }
+    return true;
   }
 
   // Is any feed (this one included) receiving data right now?
@@ -235,6 +343,8 @@ class Adapter {
       case FeedId::Coinbase: return parse_coinbase(parser_, msg, len, ctx_, batch_, c_.prices);
       case FeedId::Kraken: return parse_kraken(parser_, msg, len, ctx_, batch_, c_.prices);
       case FeedId::Binance: return parse_binance(parser_, msg, len, ctx_, batch_, c_.prices);
+      case FeedId::BinanceLiq: return parse_binance_force_order(parser_, msg, len, ctx_, batch_);
+      case FeedId::Okx: return parse_okx(parser_, msg, len, ctx_, batch_, c_.prices, &okx_contracts_);
       default: return {ParseStatus::Ignored};
     }
   }
@@ -295,19 +405,43 @@ class Adapter {
     return true;
   }
 
+  // A request may be sent now: the pool's active endpoint bucket, or the feed's own limiter.
+  bool take_token() {
+    const std::int64_t now = utc_now_ms();
+    return pool_.size() > 0 ? pool_.try_acquire(now) : limiter_.try_take(now);
+  }
+
+  // Response to a follow-up request: latency for the pool's health score.
+  void note_response(const ParseResult& r) {
+    if (pool_.size() == 0 || r.rpc_id < 100) return;
+    const std::size_t slot = static_cast<std::size_t>(r.rpc_id) % sent_ms_.size();
+    if (sent_ms_[slot] <= 0) return;
+    const double lat = static_cast<double>(utc_now_ms() - sent_ms_[slot]);
+    sent_ms_[slot] = 0;
+    if (r.status == ParseStatus::Ok || r.status == ParseStatus::Ignored) {
+      pool_.on_success(utc_now_ms(), lat);
+      const double l = pool_.health(pool_.active()).latency_ewma_ms;
+      c_.status->rpc_latency_ms.store(static_cast<std::int32_t>(l + 0.5), std::memory_order_relaxed);
+    }
+  }
+
   void eth_follow_up(const ParseResult& r) {
-    if (!r.block_announced || !limiter_.try_take(utc_now_ms())) return;
+    if (!r.block_announced || !take_token()) return;
     char req[160];
+    const unsigned id = 100u + (next_id_++ % 1000u);
     const int n = std::snprintf(req, sizeof req,
                                 R"({"jsonrpc":"2.0","id":%u,"method":"eth_getBlockByNumber","params":["0x%llx",true]})",
-                                100u + (next_id_++ % 1000u), static_cast<unsigned long long>(r.block_number));
-    if (n > 0) (void)ws_.send_text(std::string_view(req, static_cast<std::size_t>(n)), 5000);
+                                id, static_cast<unsigned long long>(r.block_number));
+    if (n > 0) {
+      sent_ms_[id % sent_ms_.size()] = utc_now_ms();
+      (void)ws_.send_text(std::string_view(req, static_cast<std::size_t>(n)), 5000);
+    }
   }
 
   // SOL: fetch the block `slot_lag` slots behind the announced slot (DELAYED).
   bool sol_follow_up(const ParseResult& r) {
     if (!r.block_announced || r.block_number <= c_.cfg->slot_lag || rpc_url_.host.empty()) return true;
-    if (!limiter_.try_take(utc_now_ms())) return true;
+    if (!take_token()) return true;
     const unsigned long long slot = r.block_number - c_.cfg->slot_lag;
     char req[320];
     const int n = std::snprintf(
@@ -318,11 +452,17 @@ class Adapter {
     std::size_t len = 0;
     int status = 0;
     std::string detail;
+    const std::int64_t t0 = utc_now_ms();
     const net::NetError e = http_.post_json(rpc_url_, std::string_view(req, static_cast<std::size_t>(n)),
                                             http_buf_.data(), http_buf_.capacity(), len, status, 15000, detail);
     if (e == net::NetError::RateLimited) {
       note(sm_.on_rate_limited(utc_now_ms()));
       return false;
+    }
+    if (e == net::NetError::None && pool_.size() > 0) {
+      pool_.on_success(utc_now_ms(), static_cast<double>(utc_now_ms() - t0));
+      c_.status->rpc_latency_ms.store(
+          static_cast<std::int32_t>(pool_.health(pool_.active()).latency_ewma_ms + 0.5), std::memory_order_relaxed);
     }
     if (e == net::NetError::TooLarge) {
       c_.status->drops.fetch_add(1, std::memory_order_relaxed);  // a block over the 8 MB limit is skipped
@@ -346,24 +486,34 @@ class Adapter {
         // Stale watchdog: silent for stale_after_s -> reconnect.
         const std::int64_t last = sm_.last_message_ms();
         const std::int64_t ref = last >= 0 ? last : sm_.since_ms();
+        if (c_.cfg->ping_s > 0.0 && !c_.cfg->ping_text.empty() &&
+            now - std::max(ref, last_ping_ms_) > static_cast<std::int64_t>(c_.cfg->ping_s * 1000.0)) {
+          last_ping_ms_ = now;
+          (void)ws_.send_text(c_.cfg->ping_text, 5000);
+        }
         if (now - ref > static_cast<std::int64_t>(c_.all->stale_after_s * 1000.0)) {
+          if (pool_.size() > 0) pool_failure(false);
           fail(net::NetError::Timeout, "no data within stale_after_s");
           return;
         }
         continue;
       }
       if (err != net::NetError::None) {
+        if (pool_.size() > 0) pool_failure(err == net::NetError::RateLimited);
         fail(err, std::string());
         return;
       }
       const ParseResult r = parse(buf_.data(), len);
+      note_response(r);
       if (!handle(r)) {
+        if (pool_.size() > 0) pool_failure(true);
         fail(net::NetError::RateLimited, "provider rate limit");
         return;
       }
       if (id_ == FeedId::Eth) {
         eth_follow_up(r);
       } else if (id_ == FeedId::Sol && !sol_follow_up(r)) {
+        if (pool_.size() > 0) pool_failure(true);
         fail(net::NetError::RateLimited, "getBlock rate limit");
         return;
       }
@@ -384,6 +534,11 @@ class Adapter {
   EventBatch batch_;
   ParseContext ctx_;
   RateLimiter limiter_;
+  EndpointPool pool_;
+  OkxContracts okx_contracts_;
+  std::array<std::int64_t, 32> sent_ms_{};
+  std::int64_t last_ping_ms_ = 0;
+  std::size_t geo_refusals_ = 0;
   unsigned next_id_ = 0;
   bool pending_ok_ = true;
   bool logged_once_ = false;

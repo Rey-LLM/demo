@@ -153,7 +153,7 @@ bool LiveSession::build_export(ExportInput& in) {
       ef.current_label = SourceLabel::Replay;
     } else if (feeds_) {
       const FeedStatus& st = feeds_->status(static_cast<FeedId>(f));
-      ef.state = kFeedStateNames[st.state.load(std::memory_order_relaxed) % 5];
+      ef.state = kFeedStateNames[st.state.load(std::memory_order_relaxed) % 6];
       if (st.replay.load(std::memory_order_relaxed)) ef.current_label = SourceLabel::Replay;
       ef.drops = st.drops.load(std::memory_order_relaxed);
       const FeedTransition* t = m.transitions(static_cast<FeedId>(f));
@@ -239,7 +239,7 @@ void LiveSession::print_feed_report() const {
     const bool replay = st.replay.load(std::memory_order_relaxed);
     std::printf("[feed] %-10s %-13s label %-8s messages %" PRIu64 "  events %" PRIu64 "  applied %" PRIu64
                 "  drops %" PRIu64 "  malformed %" PRIu64 "  reconnects %" PRIu64 "  last error: %s\n",
-                feed_name(static_cast<FeedId>(f)).data(), kFeedStateNames[st.state.load(std::memory_order_relaxed) % 5],
+                feed_name(static_cast<FeedId>(f)).data(), kFeedStateNames[st.state.load(std::memory_order_relaxed) % 6],
                 replay ? "REPLAY" : label_name(fc.label).data(), st.messages.load(std::memory_order_relaxed),
                 st.events.load(std::memory_order_relaxed), applied, st.drops.load(std::memory_order_relaxed),
                 st.malformed.load(std::memory_order_relaxed), st.reconnects.load(std::memory_order_relaxed),

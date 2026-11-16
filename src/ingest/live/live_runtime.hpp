@@ -22,11 +22,13 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 
 #include "core/mpsc_ring.hpp"
 #include "core/spsc_ring.hpp"
+#include "ingest/live/endpoint_pool.hpp"
 #include "ingest/live/feed_state.hpp"
 #include "ingest/live/live_event.hpp"
 #include "ingest/live/parsers.hpp"
@@ -52,7 +54,43 @@ struct FeedStatus {
   // source time; includes clock skew between the provider and this machine).
   // -1 until the first such event.
   std::atomic<std::int32_t> latency_ms{-1};
-  std::atomic<std::uint8_t> url_index{0};   // which of url / fallback_urls is in use
+  std::atomic<std::uint8_t> url_index{0};   // which of url / fallback_urls (or pool endpoint) is in use
+  std::atomic<std::uint8_t> url_count{1};
+  std::atomic<std::uint32_t> rotations{0};  // endpoint pool rotations
+  std::atomic<std::int32_t> rpc_latency_ms{-1};  // pool: latency EWMA of the active endpoint
+};
+
+// Endpoint rotations of the pooled feeds (ETH, SOL), for the HUD and the
+// export's session.json. Written by feed threads only when a rotation happens
+// (rare), read by the exporter; a mutex is fine at that rate.
+struct RotationRecord {
+  std::int64_t at_ms = 0;
+  FeedId feed = FeedId::Eth;
+  std::uint8_t from = 0, to = 0;
+  RotationReason reason = RotationReason::Start;
+};
+class RotationLog {
+ public:
+  static constexpr std::size_t kCapacity = 512;
+  void push(const RotationRecord& r) noexcept {
+    std::lock_guard<std::mutex> lock(mu_);
+    items_[n_ % kCapacity] = r;
+    ++n_;
+  }
+  // Copies the retained records, oldest first; returns how many were written.
+  std::size_t copy(RotationRecord* out, std::size_t cap) const noexcept {
+    std::lock_guard<std::mutex> lock(mu_);
+    const std::size_t have = n_ < kCapacity ? n_ : kCapacity;
+    const std::size_t first = n_ < kCapacity ? 0 : n_ % kCapacity;
+    const std::size_t k = have < cap ? have : cap;
+    for (std::size_t i = 0; i < k; ++i) out[i] = items_[(first + i) % kCapacity];
+    return k;
+  }
+
+ private:
+  mutable std::mutex mu_;
+  std::array<RotationRecord, kCapacity> items_{};
+  std::size_t n_ = 0;
 };
 
 using TransitionRing = SpscRing<FeedTransition, 64>;
@@ -78,6 +116,7 @@ class LiveFeeds {
   PriceBook& prices() noexcept { return prices_; }
   [[nodiscard]] const FxBoard& fx() const noexcept { return fx_; }
   [[nodiscard]] const FeedsConfig& config() const noexcept { return cfg_; }
+  [[nodiscard]] const RotationLog& rotations() const noexcept { return rotations_; }
 
   // What one adapter thread works with (pointers into this object).
   struct Context {
@@ -90,6 +129,7 @@ class LiveFeeds {
     FeedStatus* status = nullptr;
     const std::array<FeedStatus, kFeedCount>* all_status = nullptr;  // fallback policy: is any feed LIVE?
     FxBoard* fx = nullptr;
+    RotationLog* rotations = nullptr;
   };
 
  private:
@@ -97,6 +137,7 @@ class LiveFeeds {
   FeedHubs hubs_;
   PriceBook prices_;
   FxBoard fx_;
+  RotationLog rotations_;
   MpscRing<LiveEvent> ring_;
   std::array<TransitionRing, kFeedCount> transitions_{};
   std::array<FeedStatus, kFeedCount> status_{};

@@ -25,6 +25,7 @@
 
 #include "ingest/live/feed_state.hpp"
 #include "ingest/live/live_event.hpp"
+#include "model/sessions.hpp"
 
 namespace ftv {
 
@@ -52,6 +53,31 @@ struct LiveModelConfig {
   // a (dim, deep-amber) arc. Visual only; not part of model_config_hash.
   double trail_min_usd = 2500.0;
   double trail_max_per_s = 40.0;
+  // Tape: liquidations at or above this value per feed (whales always).
+  std::array<double, kFeedCount> tape_min_usd{};
+  // Trading sessions: MODELED corridor intensity = BIS daily mean x
+  // mean(session factor of both ends). Null: flat intensity (v3).
+  std::shared_ptr<const SessionCalendar> sessions;
+};
+
+// One row of the whale & liquidation tape.
+struct TapeEntry {
+  std::int64_t ts_ms = 0;
+  double usd_value = 0.0;
+  double amount = 0.0;
+  double price = 0.0;
+  FeedId feed = FeedId::BtcMempool;
+  EventKind kind = EventKind::Transaction;
+  Asset asset = Asset::BTC;
+  std::uint8_t quote_code = 0;   // Asset + 1 (0 unknown)
+  SourceLabel label = SourceLabel::Live;
+  std::uint8_t tier = 0;         // whale tier 1..3 (0: a liquidation below the whale threshold)
+  std::uint8_t flags = 0;        // LiveEvent flags (kEvBuy)
+  std::uint8_t pad0 = 0;
+  std::uint16_t src_hub = 0, dst_hub = 0;
+  char from_tag[4] = {};
+  char to_tag[4] = {};
+  std::uint64_t id_hash = 0;
 };
 
 struct WhaleRecord {
@@ -116,10 +142,14 @@ struct LiveSnapshot {
   std::uint64_t whale_overflow = 0;
   std::uint64_t volume_overflow = 0;
   std::uint64_t checksum = 0;
-  // The HUD's whale tape: the newest whales, newest first.
-  static constexpr std::size_t kTapeLength = 8;
-  std::array<WhaleRecord, kTapeLength> tape{};
+  // The HUD's whale & liquidation tape: the newest rows, newest first.
+  static constexpr std::size_t kTapeLength = 64;  // the HUD shows 12 that pass its filter
+  std::array<TapeEntry, kTapeLength> tape{};
   std::size_t tape_count = 0;
+  // The tape ring's valid window at publish time: indices [tape_first, tape_total).
+  std::uint64_t tape_first = 0;
+  std::uint64_t tape_total = 0;
+  std::uint64_t liquidations = 0;  // session count (all sizes)
 };
 
 class LiveModel {
@@ -164,7 +194,21 @@ class LiveModel {
   // journals (their lengths are stored and restored).
   void save_state(std::vector<std::uint8_t>& out) const;
   bool load_state(const std::uint8_t* data, std::size_t size) noexcept;
-  void truncate_journals(std::size_t whales, std::size_t volumes) noexcept;
+  void truncate_journals(std::size_t whales, std::size_t volumes, std::uint64_t tape = ~std::uint64_t{0}) noexcept;
+
+  // Tape ring: kTapeCapacity slots, of which the newest kTapeWindow are the
+  // tape (export and HUD). The 6384-slot margin lets a reader copy the window
+  // of a published snapshot while the model keeps appending.
+  static constexpr std::size_t kTapeCapacity = 16384;
+  static constexpr std::size_t kTapeWindow = 10000;
+  [[nodiscard]] const TapeEntry& tape_at(std::uint64_t index) const noexcept { return tape_[index % kTapeCapacity]; }
+  [[nodiscard]] std::uint64_t tape_total() const noexcept { return tape_n_; }
+  [[nodiscard]] std::uint64_t tape_first() const noexcept {
+    const std::uint64_t w = tape_n_ > kTapeWindow ? tape_n_ - kTapeWindow : 0;
+    return w > tape_floor_ ? w : tape_floor_;
+  }
+  // Highest index ever written + 1 (release); readers re-check it after copying.
+  [[nodiscard]] std::uint64_t tape_written() const noexcept { return tape_written_.load(std::memory_order_acquire); }
 
  private:
   struct SecBucket {
@@ -199,6 +243,7 @@ class LiveModel {
   void flush_volume(std::int64_t second) noexcept;
   void run_corridors(std::int64_t second) noexcept;
   std::uint8_t whale_tier(FeedId f, double usd) const noexcept;
+  void push_tape(const LiveEvent& e, double usd, std::uint8_t tier, std::size_t s, std::size_t d) noexcept;
 
   LiveModelConfig cfg_;
   std::int64_t session_start_ms_ = 0;
@@ -228,6 +273,9 @@ class LiveModel {
   std::unique_ptr<FeedTransition[]> transitions_;
   std::size_t whale_n_ = 0, volume_n_ = 0;
   std::array<std::size_t, kFeedCount> transition_n_{};
+  std::unique_ptr<TapeEntry[]> tape_;
+  std::uint64_t tape_n_ = 0, tape_floor_ = 0, liquidations_ = 0;
+  std::atomic<std::uint64_t> tape_written_{0};
 };
 
 // Double-buffered snapshot hand-off from the model thread to readers (HUD at

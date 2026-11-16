@@ -1,0 +1,71 @@
+{
+  // Exchange trading sessions. Times are local to "tz" (IANA, evaluated with
+  // the C++20 tzdb; on Windows the system ICU time-zone data). Weekends are
+  // always closed; "holidays" lists full-day closures per year (early closes
+  // are not modeled). PRE runs from pre_open to open.
+  //
+  // Used for the HUD session chips and as the MODELED intraday intensity of
+  // the fiat corridors: per-second corridor volume = BIS daily average / 86400
+  // x mean(intensity[state at each end]). Hubs without an exchange use 1.0.
+  // The factors shape the intraday profile; they are not calibrated to any
+  // published intraday distribution.
+  "as_of": "2026-11-16",
+  "intensity": { "PRE": 0.4, "OPEN": 1.0, "LUNCH": 0.5, "CLOSED": 0.2, "HOLIDAY": 0.1 },
+
+  "exchanges": [
+    {
+      "id": "TSE", "name": "Tokyo Stock Exchange", "city": "TOKYO", "hub": "TOKYO", "tz": "Asia/Tokyo",
+      "pre_open": "08:00", "open": "09:00", "close": "15:30", "lunch": ["11:30", "12:30"],
+      "source": "https://www.jpx.co.jp/english/corporate/about-jpx/calendar/index.html",
+      "as_of": "UNVERIFIED: compiled 2026-11-16 from published holiday rules; not yet checked against source",
+      "holidays": {
+        "2026": ["2026-01-01", "2026-01-02", "2026-01-12", "2026-02-11", "2026-02-23", "2026-03-20",
+                 "2026-04-29", "2026-05-04", "2026-05-05", "2026-05-06", "2026-07-20", "2026-08-11",
+                 "2026-09-21", "2026-09-22", "2026-09-23", "2026-10-12", "2026-11-03", "2026-11-23",
+                 "2026-12-31"],
+        "2027": ["2027-01-01", "2027-01-11", "2027-02-11", "2027-02-23", "2027-03-22", "2027-04-29",
+                 "2027-05-03", "2027-05-04", "2027-05-05", "2027-07-19", "2027-08-11", "2027-09-20",
+                 "2027-09-23", "2027-10-11", "2027-11-03", "2027-11-23", "2027-12-31"]
+      }
+    },
+    {
+      "id": "LSE", "name": "London Stock Exchange", "city": "LONDON", "hub": "LONDON", "tz": "Europe/London",
+      "pre_open": "07:50", "open": "08:00", "close": "16:30",
+      "source": "https://www.londonstockexchange.com/equities-trading/business-days",
+      "as_of": "UNVERIFIED: compiled 2026-11-16 from published holiday rules; not yet checked against source",
+      "holidays": {
+        "2026": ["2026-01-01", "2026-04-03", "2026-04-06", "2026-05-04", "2026-05-25", "2026-08-31",
+                 "2026-12-25", "2026-12-28"],
+        "2027": ["2027-01-01", "2027-03-26", "2027-03-29", "2027-05-03", "2027-05-31", "2027-08-30",
+                 "2027-12-27", "2027-12-28"]
+      }
+    },
+    {
+      "id": "NYSE", "name": "New York Stock Exchange / Nasdaq", "city": "NEW YORK", "hub": "NEW_YORK",
+      "tz": "America/New_York",
+      "pre_open": "04:00", "open": "09:30", "close": "16:00",
+      "source": "https://www.nyse.com/markets/hours-calendars",
+      "as_of": "UNVERIFIED: compiled 2026-11-16 from published holiday rules; not yet checked against source",
+      "holidays": {
+        "2026": ["2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19",
+                 "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25"],
+        "2027": ["2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18",
+                 "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24"]
+      }
+    },
+    {
+      // SSE closures follow the State Council holiday schedule, published
+      // each November/December for the next year: 2027 is not yet listed.
+      "id": "SSE", "name": "Shanghai Stock Exchange", "city": "SHANGHAI", "hub": "SHANGHAI", "tz": "Asia/Shanghai",
+      "pre_open": "09:15", "open": "09:30", "close": "15:00", "lunch": ["11:30", "13:00"],
+      "source": "https://english.sse.com.cn/start/trading/schedule/",
+      "as_of": "UNVERIFIED: compiled 2026-11-16 from published holiday rules; not yet checked against source",
+      "holidays": {
+        "2026": ["2026-01-01", "2026-01-02", "2026-02-16", "2026-02-17", "2026-02-18", "2026-02-19",
+                 "2026-02-20", "2026-02-23", "2026-04-06", "2026-05-01", "2026-05-04", "2026-05-05",
+                 "2026-06-19", "2026-09-25", "2026-10-01", "2026-10-02", "2026-10-05", "2026-10-06",
+                 "2026-10-07"]
+      }
+    }
+  ]
+}

@@ -26,11 +26,19 @@ inline std::string_view label_name(SourceLabel l) noexcept {
 // Feeds, in HUD order. Each has its own state machine and replay fallback.
 // FX is the ECB reference-rate poller (prices only, no flow events); FIAT is
 // the MODELED corridor generator and has no network connection.
-enum class FeedId : std::uint8_t { BtcMempool = 0, BtcBlocks, Eth, Sol, Coinbase, Kraken, Binance, Fx, Fiat, Count };
+// BINANCE_LIQ (USD-M futures forceOrder) and OKX (trades + liquidation-orders)
+// were added in v4 and are appended so the ids stored in captures keep their
+// meaning.
+enum class FeedId : std::uint8_t {
+  BtcMempool = 0, BtcBlocks, Eth, Sol, Coinbase, Kraken, Binance, Fx, Fiat, BinanceLiq, Okx, Count
+};
 inline constexpr std::size_t kFeedCount = static_cast<std::size_t>(FeedId::Count);
 // Short HUD/export names.
 inline constexpr std::array<std::string_view, kFeedCount> kFeedNames = {
-    "BTC", "BTC_BLOCKS", "ETH", "SOL", "COINBASE", "KRAKEN", "BINANCE", "FX", "FIAT"};
+    "BTC", "BTC_BLOCKS", "ETH", "SOL", "COINBASE", "KRAKEN", "BINANCE", "FX", "FIAT", "BINANCE_LIQ", "OKX"};
+// Venue names for the tape (exchanges) or chain names.
+inline constexpr std::array<std::string_view, kFeedCount> kFeedVenues = {
+    "BTC", "BTC", "ETH", "SOL", "COINBASE", "KRAKEN", "BINANCE", "ECB", "FIAT", "BINANCE", "OKX"};
 inline std::string_view feed_name(FeedId f) noexcept { return kFeedNames[static_cast<std::size_t>(f) % kFeedCount]; }
 
 enum class EventKind : std::uint8_t {
@@ -39,6 +47,8 @@ enum class EventKind : std::uint8_t {
   Trade = 2,        // one exchange trade
   Ticker = 3,       // a price update (no volume)
   Corridor = 4,     // one second of modeled fiat corridor volume
+  Liquidation = 5,  // a forced close of a derivatives position (kEvBuy: the liquidation order bought,
+                    // i.e. a SHORT position was closed)
 };
 
 // Assets and currencies. Codes double as the export's currency column.
@@ -68,9 +78,23 @@ struct alignas(64) LiveEvent {
   EventKind kind = EventKind::Transaction;
   Asset asset = Asset::BTC;
   std::uint8_t flags = 0;
-  std::uint8_t pad[11] = {};
+  // Trades and liquidations: quote currency as Asset + 1 (0: unknown, which
+  // is also what v3 captures hold in this byte). See quote_of() / set_quote().
+  std::uint8_t quote_code = 0;
+  // Address fragments for the tape ("0x3f..a1 -> 0x9c..07"): the first two
+  // and last two characters of the sender and recipient (after any "0x"),
+  // ASCII, zero when unknown. Enough to tell rows apart; never a full id.
+  char from_tag[4] = {};
+  char to_tag[4] = {};
+  std::uint8_t pad[2] = {};
 };
 static_assert(sizeof(LiveEvent) == 64, "LiveEvent must stay one cache line");
+
+inline void set_quote(LiveEvent& e, Asset q) noexcept { e.quote_code = static_cast<std::uint8_t>(static_cast<unsigned>(q) + 1u); }
+// Asset::Count when unknown.
+inline Asset quote_of(const LiveEvent& e) noexcept {
+  return e.quote_code == 0 || e.quote_code > kAssetCount ? Asset::Count : static_cast<Asset>(e.quote_code - 1u);
+}
 
 // Effects that exist only as events: the model thread pushes these to the
 // render thread (SpscRing), which turns them into live whale arcs.

@@ -42,21 +42,46 @@
       "whale_usd": 0
     },
     {
+      // Ordered endpoint pool: one endpoint active at a time, each with its own
+      // token bucket at or below the provider's published per-IP limit
+      // (DESIGN_NOTES "RPC endpoint pools"). Rotation only on a provider error
+      // or 429, never to get more throughput. "limit" quotes the provider;
+      // where no number is published the budget is a conservative 1-2 req/s.
       "id": "ETH", "enabled": true, "label": "LIVE",
-      "url": "wss://ethereum-rpc.publicnode.com",
       "docs": "https://ethereum.org/en/developers/docs/apis/json-rpc/",
       "try_pending": true,
-      "max_requests_per_s": 2,
+      "pool": [
+        { "url": "wss://ethereum-rpc.publicnode.com", "max_requests_per_s": 2, "pending_tx": true,
+          "limit": "not published as a number (fair-use)", "limit_source": "https://ethereum-rpc.publicnode.com",
+          "as_of": "UNVERIFIED" },
+        { "url": "wss://eth.drpc.org", "max_requests_per_s": 2, "pending_tx": false,
+          "limit": "free public tier, per-IP limits apply", "limit_source": "https://drpc.org/docs/howitworks/ratelimiting",
+          "as_of": "UNVERIFIED" },
+        { "url": "wss://mainnet.gateway.tenderly.co", "max_requests_per_s": 1, "pending_tx": false,
+          "limit": "public gateway, rate limited", "limit_source": "https://docs.tenderly.co/node/rpc-reference/ethereum-mainnet",
+          "as_of": "UNVERIFIED" }
+      ],
       "whale_usd": 1000000
     },
     {
+      // getBlock follow-ups go to the active endpoint's rpc_url over HTTPS.
       "id": "SOL", "enabled": true, "label": "DELAYED",
-      "url": "wss://api.mainnet-beta.solana.com",
-      "rpc_url": "https://api.mainnet-beta.solana.com",
       "docs": "https://solana.com/docs/rpc",
-      "max_requests_per_s": 3,
       "slot_lag": 32,
       "sample_cap": 32,
+      "pool": [
+        { "url": "wss://api.mainnet-beta.solana.com", "rpc_url": "https://api.mainnet-beta.solana.com",
+          "max_requests_per_s": 3,
+          "limit": "100 requests / 10 s per IP; 40 / 10 s per IP for a single RPC method",
+          "limit_source": "https://solana.com/docs/references/clusters", "as_of": "UNVERIFIED" },
+        { "url": "wss://solana-rpc.publicnode.com", "rpc_url": "https://solana-rpc.publicnode.com",
+          "max_requests_per_s": 2,
+          "limit": "not published as a number (fair-use)", "limit_source": "https://solana-rpc.publicnode.com",
+          "as_of": "UNVERIFIED" },
+        { "url": "wss://solana.drpc.org", "rpc_url": "https://solana.drpc.org", "max_requests_per_s": 2,
+          "limit": "free public tier, per-IP limits apply", "limit_source": "https://drpc.org/docs/howitworks/ratelimiting",
+          "as_of": "UNVERIFIED" }
+      ],
       "whale_usd": 250000
     },
     {
@@ -88,6 +113,29 @@
       ],
       "docs": "https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams",
       "whale_usd": 250000
+    },
+    {
+      // Binance USD-M futures liquidation orders (all symbols, one stream;
+      // BTC, ETH and SOL ones are valued, the rest counted). Same 451 rule
+      // as spot: restricted regions show GEO_BLOCKED.
+      "id": "BINANCE_LIQ", "enabled": true, "label": "LIVE",
+      "url": "wss://fstream.binance.com/ws/!forceOrder@arr",
+      "docs": "https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/All-Market-Liquidation-Order-Streams",
+      "whale_usd": 1000000,
+      "tape_min_usd": 25000
+    },
+    {
+      // OKX public channel: spot trades and swap liquidation orders. Contract
+      // sizes come from the public instruments endpoint at connect; OKX
+      // closes idle connections after 30 s, so "ping" is sent after 20 s.
+      "id": "OKX", "enabled": true, "label": "LIVE",
+      "url": "wss://ws.okx.com:8443/ws/v5/public",
+      "meta_url": "https://www.okx.com/api/v5/public/instruments?instType=SWAP",
+      "docs": "https://www.okx.com/docs-v5/en/#public-data-websocket-trades-channel",
+      "subscribe": ["{\"op\":\"subscribe\",\"args\":[{\"channel\":\"trades\",\"instId\":\"BTC-USDT\"},{\"channel\":\"trades\",\"instId\":\"ETH-USDT\"},{\"channel\":\"trades\",\"instId\":\"SOL-USDT\"},{\"channel\":\"trades\",\"instId\":\"BTC-USD\"},{\"channel\":\"liquidation-orders\",\"instType\":\"SWAP\"}]}"],
+      "ping": "ping", "ping_s": 20,
+      "whale_usd": 250000,
+      "tape_min_usd": 25000
     },
     {
       // ECB euro reference rates (published once per working day, ~16:00 CET)

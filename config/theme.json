@@ -1,7 +1,9 @@
 {
-  // ftviz palette: four hues, nothing else. Hex values are sRGB and are
-  // converted to linear RGB at load; the renderer outputs through an sRGB
-  // target. Alphas and intensities are clamped to the ranges noted here.
+  // ftviz palette, locked: Obsidian, Amber, Ink, Neon Gold (whales and
+  // liquidations only) and, since v4, Night Lights and Day Tint. The loader
+  // rejects any other hex value. Hex values are sRGB and are converted to
+  // linear RGB at load; the renderer outputs through an sRGB target. Alphas
+  // and intensities are clamped to the ranges noted here.
 
   "background": "#050608",                  // "Obsidian": flat, no gradient, no noise
 
@@ -31,11 +33,19 @@
   },
 
   "coastline": {
-    "color": "#C8962E",                     // Amber ...
-    "blend_toward": "#3A3328",              // ... mixed toward graphite (same warm hue, darker)
-    "blend": 0.45,                          // 0 = pure amber, 1 = graphite
-    "alpha": 0.22,                          // 0.18 .. 0.28, 1 px analytic AA hairline
+    "color": "#C8962E",                     // Amber
+    "alpha": 0.22,                          // 0.18 .. 0.28, 1 px analytic AA hairline (day side)
+    "night_factor": 0.5,                    // night side: dimmed to 50 %
     "close_zoom_altitude": 1400.0           // below this camera altitude the 1:50m set is drawn
+  },
+
+  "earth": {
+    "day_tint": "#0B0E13",                  // "Day Tint": base of the sunlit hemisphere
+    "night_lights": "#E8A54B",              // "Night Lights": city lights, night side only
+    "night_lights_max": 1.5,                // HDR cap; city lights never reach the emissive attachment
+    "twilight": 0.10,                       // d = smoothstep(-0.10, 0.10, N.sun): ~6 degree twilight band
+    "cable_alpha": 0.12,                    // submarine cables: Amber hairline, 0.10 .. 0.16
+    "rim_twilight": 0.35                    // warm (Night Lights) tint of the rim at the terminator
   },
 
   "atmosphere": {
@@ -46,8 +56,8 @@
   },
 
   "whale": {
-    "color": "#FF9A1F",                     // "Deep Amber": tier-1 whales; the emissive pass only
-    "color_hot": "#FFF1C9",                 // "White Gold": tier-3 whales and every arc head
+    "color": "#FFC23D",                     // "Neon Gold": whales and liquidations, the emissive pass only
+    "color_hot": "#FFC23D",                 // arc heads: the same hue, hotter by intensity only
     "intensity_min": 4.0,                   // HDR multiplier, tier 1 ...
     "intensity_max": 8.0,                   // ... tier 3
     "width_px": [2, 3, 4],                  // by tier
@@ -57,7 +67,7 @@
   },
 
   "post": {
-    "bloom_strength": 1.0,                  // dual-filter Kawase, 3 mips, emissive only
+    "bloom_strength": 1.0,                  // dual-filter Kawase, 6 mips, emissive only
     "exposure": 0.6,                        // ACES fitted
     "vignette": 0.025                       // <= 0.03
   }
