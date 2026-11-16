@@ -1,6 +1,7 @@
 #include "app/application.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <array>
 #include <cinttypes>
 #include <cmath>
@@ -36,6 +37,9 @@
 #include "model/edge_aggregation.hpp"
 #include "model/graph_builder.hpp"
 #include "model/hub_taxonomy.hpp"
+#include "model/cables.hpp"
+#include "model/citylights.hpp"
+#include "model/solar.hpp"
 #include "model/whales.hpp"
 #include "app/camera_presets.hpp"
 #include "app/png_writer.hpp"
@@ -52,6 +56,36 @@
 namespace ftv {
 
 namespace {
+
+// Earth layers loaded at startup (all optional: a missing asset only turns
+// its layer off, with a warning).
+struct EarthData {
+  std::optional<CableSet> cables;
+  RouteTable routes;
+  std::optional<CityLights> lights;
+  [[nodiscard]] EarthAssets assets() const noexcept {
+    EarthAssets a;
+    a.cables = cables ? &*cables : nullptr;
+    a.routes = routes.points.empty() ? nullptr : &routes;
+    a.lights = lights ? &*lights : nullptr;
+    return a;
+  }
+};
+
+std::int64_t wall_clock_ms() noexcept {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
+glm::vec3 sun_vector(std::int64_t utcMs) noexcept {
+  float v[3];
+  sun_direction(subsolar_point(utcMs), v);
+  return {v[0], v[1], v[2]};
+}
+
+// Screenshots must not depend on when they are taken: without --sun-time
+// and without a model clock they use the March 2026 equinox at 12:00 UTC.
+constexpr std::int64_t kDefaultScreenshotSunMs = 1774008000000;  // 2026-03-20T12:00:00Z
 
 namespace fs = std::filesystem;
 
@@ -334,8 +368,8 @@ float wrap_time(float t, float period) {
 class Viewer {
  public:
   Viewer(const CliOptions& cli, const RenderSettings& rs, const std::string& shaderDir, const Graph& graph,
-         const HubTaxonomy& tax, const WhaleSet& whales, const CoastlineSet& coast, const IngestResult& ingest,
-         LayoutEngine& engine, LiveSession* live, std::string inputName)
+         const HubTaxonomy& tax, const WhaleSet& whales, const CoastlineSet& coast, const EarthData& earth,
+         const IngestResult& ingest, LayoutEngine& engine, LiveSession* live, std::string inputName)
       : cli_(cli),
         rs_(rs),
         shader_dir_(shaderDir),
@@ -343,6 +377,7 @@ class Viewer {
         tax_(tax),
         whales_(whales),
         coast_(coast),
+        earth_(earth),
         engine_(engine),
         live_(live),
         title_("ftviz - " + inputName),
@@ -374,6 +409,8 @@ class Viewer {
   const HubTaxonomy& tax_;
   const WhaleSet& whales_;
   const CoastlineSet& coast_;
+  const EarthData& earth_;
+  std::int64_t model_now_ms_ = 0;  // live / replay model clock (UTC ms), 0 until the first snapshot
   LayoutEngine& engine_;
   LiveSession* live_;
   std::string title_;
@@ -421,6 +458,7 @@ bool Viewer::create_gpu_side() {
 #endif
   install_callbacks(window_.handle(), &input_);
   renderer_ = std::make_unique<Renderer>(graph_, tax_, whales_, coast_, rs_, window_.caps(), shader_dir_);
+  renderer_->set_earth(earth_.assets());
   if (!renderer_->init(err)) {
     FTV_LOG_ERROR("renderer initialisation failed:\n%s", err.c_str());
     return false;
@@ -491,6 +529,7 @@ void Viewer::refresh_live_hud() {
   live_in_.paused = paused_;
   if (const LiveSnapshot* snap = m.snapshots().acquire()) {
     live_hud_.refresh(*snap, live_in_);
+    model_now_ms_ = snap->now_ms;
     m.snapshots().release(snap);
   }
 }
@@ -858,6 +897,9 @@ int Viewer::run() {
     p.live_time = live_clock_;
     p.hovered_hub = hovered_hub_;
     p.pinned_hub = pinned_hub_;
+    // Terminator: --sun-time, else the model clock (wall clock LIVE, capture
+    // time REPLAY), else the wall clock.
+    p.sun_dir = sun_vector(cli_.sun_time_set ? cli_.sun_time_ms : model_now_ms_ > 0 ? model_now_ms_ : wall_clock_ms());
     inv_view_proj_ = glm::inverse(p.proj * p.view);
     renderer_->draw_frame(p);
 
@@ -909,7 +951,7 @@ int Viewer::run() {
 
 int render_screenshot(const CliOptions& cli, const RenderSettings& rs, const std::string& shaderDir,
                       const Graph& graph, const HubTaxonomy& tax, const WhaleSet& whales, const CoastlineSet& coast,
-                      LayoutEngine& engine, LiveSession* live) {
+                      const EarthData& earth, LayoutEngine& engine, LiveSession* live) {
   GlWindow ctx;
   std::string err;
   if (!ctx.create_offscreen(cli.gl_debug, err)) {
@@ -919,6 +961,7 @@ int render_screenshot(const CliOptions& cli, const RenderSettings& rs, const std
   int code = 0;
   {
     Renderer renderer(graph, tax, whales, coast, rs, ctx.caps(), shaderDir);
+    renderer.set_earth(earth.assets());
     if (!renderer.init(err)) {
       FTV_LOG_ERROR("renderer initialisation failed:\n%s", err.c_str());
       return 1;
@@ -967,6 +1010,20 @@ int render_screenshot(const CliOptions& cli, const RenderSettings& rs, const std
       }
     }
     const bool overlay = cli.overlay && live;
+    std::int64_t sunMs = kDefaultScreenshotSunMs;
+    if (cli.sun_time_set) {
+      sunMs = cli.sun_time_ms;
+    } else if (live) {
+      if (const LiveSnapshot* snap = live->model().snapshots().acquire()) {
+        if (snap->now_ms > 0) sunMs = snap->now_ms;
+        live->model().snapshots().release(snap);
+      }
+    }
+    {
+      char iso[32];
+      format_iso8601_utc(sunMs, iso, sizeof(iso));
+      std::printf("[screenshot] sun time %s\n", iso);
+    }
     const LiveHudLayout hudLayout = LiveHud::layout(w, h, 10.0f * HudStats::text_scale(h));
     for (unsigned f = 0; f <= warm; ++f) {
       renderer.begin_frame(engine.snapshots());
@@ -984,6 +1041,7 @@ int render_screenshot(const CliOptions& cli, const RenderSettings& rs, const std
       p.inter_detail = cli.inter_detail;
       p.show_hud = overlay;
       p.present = false;
+      p.sun_dir = sun_vector(sunMs);
       renderer.draw_frame(p);
     }
     std::vector<std::uint8_t> rgba;
@@ -1113,6 +1171,30 @@ int run_application(const CliOptions& cli, const std::string& exeDir) {
   }
   std::printf("[assets] coastlines: %zu segments (110m)%s, Natural Earth, public domain\n", coast.coarse_count,
               coast.fine_count ? " + 50m close-zoom set" : "");
+  EarthData earth;
+  {
+    std::string e;
+    earth.cables = load_cables(assetsDir + "/cables.bin", e);
+    if (!earth.cables) {
+      FTV_LOG_WARN("submarine cables off: %s", e.c_str());
+    } else {
+      std::vector<HubSite> sites;
+      for (const HubDef& d : taxonomy->hubs()) {
+        sites.push_back(HubSite{d.lat_deg, d.lon_deg, d.type == HubType::FiatCenter});
+      }
+      earth.routes = build_routes(*earth.cables, sites);
+      std::printf("[assets] cables: %zu cables, %zu segments; %zu MODELED hub routes in %.0f ms\n",
+                  earth.cables->cables.size(), earth.cables->segment_count(), earth.routes.routed_pairs,
+                  earth.routes.build_ms);
+    }
+    earth.lights = load_city_lights(assetsDir + "/citylights.bin", e);
+    if (!earth.lights) {
+      FTV_LOG_WARN("city lights off: %s", e.c_str());
+    } else {
+      std::printf("[assets] city lights: %ux%u BC4, %u mips (NASA Black Marble)\n", earth.lights->width,
+                  earth.lights->height, earth.lights->levels);
+    }
+  }
   LiveSessionOptions lo;
   lo.mode = cli.live ? ModelMode::Live : cli.replay ? ModelMode::Replay : ModelMode::Dataset;
   lo.feeds_path = feedsPath;
@@ -1136,7 +1218,7 @@ int run_application(const CliOptions& cli, const std::string& exeDir) {
   engine.publish_now(cli.prelayout > 0 ? &pre : nullptr);
   if (!cli.screenshot.empty()) {
     // Screenshots capture the pre-laid-out state exactly (layout thread never starts).
-    return render_screenshot(cli, rs, shaderDir, graph, *taxonomy, whales, coast, engine, live.get());
+    return render_screenshot(cli, rs, shaderDir, graph, *taxonomy, whales, coast, earth, engine, live.get());
   }
   if (cli.start_paused) engine.set_paused(true);
   engine.start();
@@ -1150,7 +1232,7 @@ int run_application(const CliOptions& cli, const std::string& exeDir) {
   const std::string inputName = haveInput ? fs::path(cli.input).filename().string() : std::string("live");
   int code = 0;
   {
-    Viewer viewer(cli, rs, shaderDir, graph, *taxonomy, whales, coast, ingest, engine, live.get(), inputName);
+    Viewer viewer(cli, rs, shaderDir, graph, *taxonomy, whales, coast, earth, ingest, engine, live.get(), inputName);
     code = viewer.run();
   }
   if (live) live->stop();

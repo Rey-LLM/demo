@@ -56,6 +56,7 @@ struct FeedsConfig {
   std::array<std::uint16_t, kAssetCount> quote_hub{};
   bool fiat_enabled = true;
   std::string fiat_baseline = "config/flows_baseline.csv";
+  std::string sessions = "config/sessions.json";  // trading sessions (MODELED corridor intensity, HUD chips)
 };
 
 std::optional<FeedsConfig> load_feeds_config(const std::string& path, const HubTaxonomy& taxonomy, std::string& error);

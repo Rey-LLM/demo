@@ -3,6 +3,8 @@
 //   UBO  0: Frame            SSBO 0: node positions (layout space, current ring region)
 //   SSBO 1: edges            SSBO 2: hubs           SSBO 4: highlight bits
 //   SSBO 8: HUD glyphs       SSBO 9: hub label glyphs   SSBO 10: whale events
+//   SSBO 11: coastline / cable segments  SSBO 12: live arcs
+//   SSBO 14: route index (first, count per hub pair)  SSBO 15: route points
 // All colours arrive in linear RGB (theme hex values are converted at load).
 
 layout(std140, binding = 0) uniform Frame {
@@ -28,7 +30,16 @@ layout(std140, binding = 0) uniform Frame {
   vec4 u_atmo1;      // x Fresnel exponent, y shell scale, z live clock (s), w unused
   uvec4 u_pick;      // x hovered hub + 1, y pinned hub + 1, z live arc slots, w layer mask
   vec4 u_gold_hot;   // rgb whale emissive at tier 3 and at arc heads ("white gold"), w unused
+  vec4 u_sun;        // xyz unit vector toward the sun (globe frame), w twilight half-width (N.sun)
+  vec4 u_day;        // rgb Day Tint (linear), w coastline factor on the night side
+  vec4 u_lights;     // rgb Night Lights (linear), w HDR cap (<= 1.5)
+  vec4 u_cable;      // rgb cable amber, w cable alpha
+  vec4 u_rim;        // x twilight tint of the rim, y lights enabled (0/1), zw unused
+  uvec4 u_routes;    // x hub count of the route table (0 = no routes), yzw unused
 };
+
+// Day factor of a surface normal: 1 sunlit, 0 night, smooth across the terminator.
+float day_factor(vec3 n) { return smoothstep(-u_sun.w, u_sun.w, dot(n, u_sun.xyz)); }
 
 // Layer bits in u_pick.w (FrameParams::layers).
 const uint kLayerCoast = 1u;
@@ -37,6 +48,8 @@ const uint kLayerNodes = 4u;
 const uint kLayerArcs = 8u;
 const uint kLayerWhales = 16u;
 const uint kLayerHubs = 32u;
+const uint kLayerCables = 64u;
+const uint kLayerLights = 128u;
 
 layout(std430, binding = 0) readonly buffer NodePositions { float node_pos[]; };
 

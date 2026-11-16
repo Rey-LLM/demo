@@ -93,6 +93,8 @@ bool Renderer::create_programs(std::string& error) {
   if (!make(prog_composite_, {fsv, {GL_FRAGMENT_SHADER, "composite.frag"}})) return false;
   if (!make(prog_present_, {fsv, {GL_FRAGMENT_SHADER, "present.frag"}})) return false;
   loc_coast_first_ = glGetUniformLocation(prog_coast_.id(), "u_first");
+  loc_coast_color_ = glGetUniformLocation(prog_coast_.id(), "u_color");
+  loc_coast_night_ = glGetUniformLocation(prog_coast_.id(), "u_night");
   loc_arc_inter_ = glGetUniformLocation(prog_arc_.id(), "u_inter");
   loc_arc_first_ = glGetUniformLocation(prog_arc_.id(), "u_first");
   loc_arc_segments_ = glGetUniformLocation(prog_arc_.id(), "u_segments");
@@ -303,6 +305,78 @@ void Renderer::upload_static_data() {
     coast_buf_ = gl::create_buffer();
     glNamedBufferStorage(coast_buf_.id(), static_cast<GLsizeiptr>(bytes), data, 0);
   }
+
+  // ---- submarine cables (same segment layout as the coastlines) ---------------
+  {
+    std::vector<CoastSegment> seg;
+    if (earth_.cables) {
+      const CableSet& c = *earth_.cables;
+      seg.reserve(c.segment_count());
+      for (const CablePolyline& pl : c.cables) {
+        for (std::uint32_t i = 0; i + 1 < pl.count; ++i) {
+          const std::size_t a = pl.first + i, b = a + 1;
+          if (2 * b + 1 >= c.latlon.size()) break;
+          seg.push_back(CoastSegment{c.latlon[2 * a], c.latlon[2 * a + 1], c.latlon[2 * b], c.latlon[2 * b + 1]});
+        }
+      }
+    }
+    cable_count_ = static_cast<std::uint32_t>(seg.size());
+    if (seg.empty()) seg.push_back(CoastSegment{});
+    cable_buf_ = gl::create_buffer();
+    glNamedBufferStorage(cable_buf_.id(), static_cast<GLsizeiptr>(seg.size() * sizeof(CoastSegment)), seg.data(), 0);
+  }
+
+  // ---- MODELED routes: index per hub pair + points ----------------------------
+  {
+    std::vector<std::uint32_t> index;
+    std::vector<RoutePoint> pts;
+    route_hubs_ = 0;
+    if (earth_.routes && earth_.routes->hub_count == taxonomy_.size() && !earth_.routes->points.empty()) {
+      const RouteTable& rt = *earth_.routes;
+      route_hubs_ = static_cast<std::uint32_t>(rt.hub_count);
+      index.resize(rt.first.size() * 2);
+      for (std::size_t i = 0; i < rt.first.size(); ++i) {
+        index[2 * i] = rt.first[i];
+        index[2 * i + 1] = rt.count[i];
+      }
+      pts = rt.points;
+    }
+    if (index.empty()) index.assign(2, 0u);
+    if (pts.empty()) pts.push_back(RoutePoint{0, 0, 0, 0});
+    route_index_ = gl::create_buffer();
+    glNamedBufferStorage(route_index_.id(), static_cast<GLsizeiptr>(index.size() * sizeof(std::uint32_t)), index.data(),
+                         0);
+    route_points_ = gl::create_buffer();
+    glNamedBufferStorage(route_points_.id(), static_cast<GLsizeiptr>(pts.size() * sizeof(RoutePoint)), pts.data(), 0);
+  }
+
+  // ---- city lights: BC4 with its mip chain (1x1 black without the asset) ------
+  {
+    lights_tex_ = gl::create_texture(GL_TEXTURE_2D);
+    const CityLights* cl = earth_.lights;
+    lights_loaded_ = cl && cl->width > 0 && cl->levels > 0;
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    if (lights_loaded_) {
+      glTextureStorage2D(lights_tex_.id(), static_cast<GLsizei>(cl->levels), GL_COMPRESSED_RED_RGTC1,
+                         static_cast<GLsizei>(cl->width), static_cast<GLsizei>(cl->height));
+      for (std::uint32_t l = 0; l < cl->levels; ++l) {
+        const auto lw = static_cast<GLsizei>(std::max<std::uint32_t>(cl->width >> l, 1));
+        const auto lh = static_cast<GLsizei>(std::max<std::uint32_t>(cl->height >> l, 1));
+        glCompressedTextureSubImage2D(lights_tex_.id(), static_cast<GLint>(l), 0, 0, lw, lh, GL_COMPRESSED_RED_RGTC1,
+                                      static_cast<GLsizei>(CityLights::level_bytes(cl->width, cl->height, l)),
+                                      cl->bc4.data() + cl->level_offset(l));
+      }
+      glTextureParameteri(lights_tex_.id(), GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    } else {
+      const std::uint8_t black = 0;
+      glTextureStorage2D(lights_tex_.id(), 1, GL_R8, 1, 1);
+      glTextureSubImage2D(lights_tex_.id(), 0, 0, 0, 1, 1, GL_RED, GL_UNSIGNED_BYTE, &black);
+      glTextureParameteri(lights_tex_.id(), GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    }
+    glTextureParameteri(lights_tex_.id(), GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTextureParameteri(lights_tex_.id(), GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTextureParameteri(lights_tex_.id(), GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  }
 }
 
 bool Renderer::init(std::string& error) {
@@ -350,9 +424,10 @@ bool Renderer::init(std::string& error) {
   glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);  // reverse-Z needs [0,1] clip depth
   glDisable(GL_CULL_FACE);
   FTV_LOG_INFO("renderer: %zu nodes, %u intra + %u inter edges (budget %u / %u), %zu whale events, %u label glyphs, "
-               "%u + %u coastline segments; init %.0f ms (shaders %.0f, static data %.0f)",
+               "%u + %u coastline segments, %u cable segments, %u routed hubs, city lights %s; "
+               "init %.0f ms (shaders %.0f, static data %.0f)",
                node_count_, intra_count_, inter_count_, intra_lod_, inter_lod_, whale_count_, label_glyphs_, coast_coarse_,
-               coast_fine_,
+               coast_fine_, cable_count_, route_hubs_, lights_loaded_ ? "on" : "off",
                programsMs + staticMs + initClock.lap_ms(), programsMs, staticMs);
   return true;
 }
@@ -565,6 +640,16 @@ void Renderer::draw_frame(const FrameParams& p) {
   u.pick = glm::uvec4(p.hovered_hub >= 0 ? static_cast<std::uint32_t>(p.hovered_hub) + 1u : 0u,
                       p.pinned_hub >= 0 ? static_cast<std::uint32_t>(p.pinned_hub) + 1u : 0u, kLiveArcSlots, p.layers);
   u.gold_hot = glm::vec4(th.whale_hot[0], th.whale_hot[1], th.whale_hot[2], 0.0f);
+  {
+    const float sl = glm::length(p.sun_dir);
+    const glm::vec3 sun = sl > 1e-6f ? p.sun_dir / sl : glm::vec3(0.0f, 0.0f, 1.0f);
+    u.sun = glm::vec4(sun, th.twilight);
+  }
+  u.day = glm::vec4(th.day_tint[0], th.day_tint[1], th.day_tint[2], th.coast_night);
+  u.lights = glm::vec4(th.night_lights[0], th.night_lights[1], th.night_lights[2], std::min(th.night_lights_max, 1.5f));
+  u.cable = glm::vec4(th.graticule[0], th.graticule[1], th.graticule[2], th.cable_alpha);
+  u.rim = glm::vec4(th.rim_twilight, (lights_loaded_ && (p.layers & kLayerLights)) ? 1.0f : 0.0f, 0.0f, 0.0f);
+  u.routes = glm::uvec4(route_hubs_, 0u, 0u, 0u);
   std::memcpy(static_cast<char*>(uniforms_.data()) + static_cast<std::size_t>(ubo_region_bytes_) * slot_, &u, sizeof(u));
   std::memcpy(static_cast<char*>(live_arcs_.data()) + static_cast<std::size_t>(live_region_bytes_) * slot_,
               live_master_.data(), sizeof(LiveArcSlot) * kLiveArcSlots);
@@ -580,6 +665,9 @@ void Renderer::draw_frame(const FrameParams& p) {
   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 11, coast_buf_.id());
   glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 12, live_arcs_.id(), live_region_bytes_ * slot_,
                     static_cast<GLsizeiptr>(sizeof(LiveArcSlot) * kLiveArcSlots));
+  glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 14, route_index_.id());
+  glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 15, route_points_.id());
+  glBindTextureUnit(3, lights_tex_.id());
 
   // ---- scene target ------------------------------------------------------------
   glDisable(GL_FRAMEBUFFER_SRGB);
@@ -633,8 +721,26 @@ void Renderer::draw_frame(const FrameParams& p) {
     counters_.coast_segments = count;
     glUseProgram(prog_coast_.id());
     glUniform1ui(loc_coast_first_, first);
+    glUniform4f(loc_coast_color_, th.coast[0], th.coast[1], th.coast[2], th.coast_alpha);
+    glUniform1f(loc_coast_night_, th.coast_night);
     glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(count));
     ++counters_.scene_draws;
+  }
+  timers_.end();
+
+  // Pass 1d - submarine cables: the same hairline program over the cable
+  // segment buffer, Amber at alpha 0.10 .. 0.16, equally visible day and night.
+  timers_.begin(slot_, GpuPass::Cables);
+  {
+    const std::uint32_t count = (p.layers & kLayerCables) ? cable_count_ : 0u;
+    counters_.cable_segments = count;
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 11, cable_buf_.id());
+    glUniform1ui(loc_coast_first_, 0u);
+    glUniform4f(loc_coast_color_, th.graticule[0], th.graticule[1], th.graticule[2], th.cable_alpha);
+    glUniform1f(loc_coast_night_, 1.0f);
+    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(count));
+    ++counters_.scene_draws;
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 11, coast_buf_.id());
   }
   timers_.end();
 
@@ -665,23 +771,22 @@ void Renderer::draw_frame(const FrameParams& p) {
   counters_.scene_draws += 2;
   timers_.end();
 
-  // Pass 4 - whales: emissive attachment only.
+  // Pass 4 - whales (emissive attachment) and flow trails (scene attachment,
+  // written as zero by whale fragments and vice versa; additive blending).
   timers_.begin(slot_, GpuPass::Whales);
-  glColorMaski(0, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
   glColorMaski(1, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
   glUseProgram(prog_whale_.id());
-  glUniform1i(loc_whale_segments_, segs);
-  glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 2 * (segs + 1),
+  glUniform1i(loc_whale_segments_, kWhaleSegments);
+  glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 2 * (kWhaleSegments + 1),
                         static_cast<GLsizei>((p.layers & kLayerWhales) ? 2 * (whale_count_ + kLiveArcSlots) : 0));
   ++counters_.scene_draws;
   glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
   glColorMaski(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
   timers_.end();
 
-  // Pass 5 - hub markers and labels (screen space, no depth test). Markers
-  // also write a small glow to the emissive attachment.
+  // Pass 5 - hub markers and labels (screen space, no depth test, scene
+  // attachment only: since v4 nothing but whales reaches the emissive target).
   timers_.begin(slot_, GpuPass::Hubs);
-  glColorMaski(1, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
   glDisable(GL_DEPTH_TEST);
   glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
   glUseProgram(prog_hub_.id());
@@ -711,7 +816,7 @@ void Renderer::draw_frame(const FrameParams& p) {
   }
 
   // ---- post: resolve, bloom (emissive only), composite ---------------------------
-  timers_.begin(slot_, GpuPass::Post);
+  timers_.begin(slot_, GpuPass::Bloom);
   glDisable(GL_DEPTH_TEST);
   glDisable(GL_BLEND);
   glNamedFramebufferReadBuffer(scene_fbo_.id(), GL_COLOR_ATTACHMENT0);
@@ -748,6 +853,9 @@ void Renderer::draw_frame(const FrameParams& p) {
     sh = level_h_[li];
   }
 
+  timers_.end();
+
+  timers_.begin(slot_, GpuPass::Post);
   glBindFramebuffer(GL_FRAMEBUFFER, output_fbo_.id());
   glViewport(0, 0, w, h);
   glEnable(GL_FRAMEBUFFER_SRGB);  // linear -> sRGB on write

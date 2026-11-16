@@ -10,9 +10,11 @@ flat in float v_halfw;
 flat in float v_intensity;
 flat in float v_heat;
 flat in uint v_kind;
+flat in uint v_flow;
 in float v_fade;
 
-layout(location = 1) out vec4 o_emissive;
+layout(location = 0) out vec4 o_color;     // flow trails (amber, additive, no bloom)
+layout(location = 1) out vec4 o_emissive;  // whales: Neon Gold, bloomed
 
 void main() {
   float e;
@@ -43,5 +45,13 @@ void main() {
   }
   e *= v_fade;
   if (e <= 0.0) discard;
-  o_emissive = vec4(mix(u_gold.rgb, u_gold_hot.rgb, hot) * e, 1.0);
+  if (v_flow == 1u) {
+    // Flow trail: Amber, scene attachment, intensity capped well below the
+    // whale range so it never reads as gold.
+    o_color = vec4(u_cable.rgb * min(e, 1.2), 0.0);
+    o_emissive = vec4(0.0);
+  } else {
+    o_color = vec4(0.0);
+    o_emissive = vec4(mix(u_gold.rgb, u_gold_hot.rgb, hot) * e, 1.0);
+  }
 }

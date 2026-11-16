@@ -23,6 +23,28 @@ layout(std430, binding = 12) readonly buffer LiveArcs { LiveArc live_arcs[]; };
 
 uniform int u_segments;
 
+// MODELED routes along submarine cable geometry (model/cables.hpp): per
+// ordered hub pair the first point and the point count (0: no route, the
+// great-circle arc is used), then unit vectors with the normalised arc
+// length in w. Real traffic paths are not public; these are labelled
+// "ROUTE · MODELED (cable geometry)" wherever they are described.
+layout(std430, binding = 14) readonly buffer RouteIndex { uvec2 route_index[]; };
+layout(std430, binding = 15) readonly buffer RoutePoints { vec4 route_points[]; };
+
+// Point at normalised length t on a route (binary search on w, then a
+// normalised lerp inside the segment), hugging the surface with a low lift.
+vec3 route_point(uvec2 r, float t) {
+  uint lo = r.x, hi = r.x + r.y - 1u;
+  while (hi - lo > 1u) {
+    uint mid = (lo + hi) >> 1;
+    if (route_points[mid].w <= t) lo = mid; else hi = mid;
+  }
+  vec4 a = route_points[lo], b = route_points[hi];
+  float f = clamp((t - a.w) / max(b.w - a.w, 1e-6), 0.0, 1.0);
+  vec3 u = normalize(mix(a.xyz, b.xyz, f));
+  return u * (u_globe.x * (1.0 + u_globe.y + 0.006 * sin(3.14159265 * t)));
+}
+
 out float v_t;          // arc parameter of this vertex
 out float v_side;       // -1 .. 1 across the ribbon
 out vec2 v_px;          // flash: offset from the centre (device px)
@@ -32,6 +54,7 @@ flat out float v_halfw; // ribbon half-width / flash radius (device px)
 flat out float v_intensity;
 flat out float v_heat;  // 0 tier 1 (deep amber) .. 1 tier 3 (white gold)
 flat out uint v_kind;   // 0 arc, 1 flash
+flat out uint v_flow;   // 1: flow trail (scene attachment, no bloom)
 out float v_fade;       // depth fade (1.0 near .. 0.35 far), like the normal arcs
 
 const vec2 kCorners[4] = vec2[4](vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0), vec2(1.0, 1.0));
@@ -46,6 +69,7 @@ void main() {
   uint idx = flash ? inst - T : inst;
   vec3 a, b;
   float age, tierF;
+  uvec2 route = uvec2(0u);
   if (idx < W) {
     Whale w = whales[idx];
     a = globe_position(node_layout_position(w.nodes.x), w.nodes.z);
@@ -57,10 +81,13 @@ void main() {
     if (l.hubs.w == 0u) {
       gl_Position = kCulled;
       v_kind = 0u;
+      v_flow = 0u;
       return;
     }
     a = hub_surface(l.hubs.x);
     b = hub_surface(l.hubs.y);
+    uint H = u_routes.x;
+    if (l.hubs.x < H && l.hubs.y < H) route = route_index[l.hubs.x * H + l.hubs.y];
     age = u_atmo1.z - l.timing.x;
     tierF = float(l.hubs.z);
   }
@@ -77,6 +104,7 @@ void main() {
   v_intensity = peak;
   v_heat = tier == 0u ? 0.0 : float(tier - 1u) * 0.5;
   v_fade = 1.0;
+  v_flow = tier == 0u ? 1u : 0u;
 
   if (!flash) {
     v_kind = 0u;
@@ -89,8 +117,10 @@ void main() {
     float side = (gl_VertexID & 1) == 0 ? -1.0 : 1.0;
     float t = float(s) / float(u_segments);
     float dt = 1.0 / float(u_segments);
-    vec3 p = arc_point(a, b, t);
-    vec3 q = arc_point(a, b, t < 1.0 ? t + dt : t - dt);
+    float tq = t < 1.0 ? t + dt : t - dt;
+    bool routed = route.y >= 2u;
+    vec3 p = routed ? route_point(route, t) : arc_point(a, b, t);
+    vec3 q = routed ? route_point(route, tq) : arc_point(a, b, tq);
     vec4 cp = u_view_proj * vec4(p, 1.0);
     vec4 cq = u_view_proj * vec4(q, 1.0);
     if (cp.w <= u_shape1.w || cq.w <= u_shape1.w) {

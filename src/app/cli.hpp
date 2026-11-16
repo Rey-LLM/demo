@@ -2,6 +2,7 @@
 // Command-line options for the ftviz binary.
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 #include "ingest/ingest.hpp"
@@ -55,6 +56,8 @@ struct CliOptions {
   std::string export_dir;          // --export DIR: where exports are written (default: current directory)
   float export_after = -1.0f;      // --export-after S: export once after S seconds, then exit
   std::string pin_hub;             // --pin HUB_ID: start with that hub's panel pinned
+  std::int64_t sun_time_ms = 0;    // --sun-time ISO8601: fixed UTC time for the terminator
+  bool sun_time_set = false;       // (default: the model clock: wall clock LIVE, capture time REPLAY)
   bool overlay = false;            // --overlay: screenshots include the live HUD layer (no timing text)
   bool help = false;
 };

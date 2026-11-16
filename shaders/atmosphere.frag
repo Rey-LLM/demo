@@ -3,6 +3,9 @@
 // at alpha <= 0.22, with an analytically anti-aliased outer edge. A crisp
 // edge, not a haze. Writes the scene attachment only (the emissive
 // attachment is masked off), so the rim never blooms.
+// v4: the rim lives on the day-side limb (scaled by the day factor of the
+// shell normal, a 15 % floor keeps the night limb readable) and takes a warm
+// Night Lights tint inside the twilight band around the terminator.
 #include "common.glsl"
 
 in vec2 v_uv;
@@ -26,7 +29,11 @@ void main() {
   float ndv = clamp(dot(n, -rd), 0.0, 1.0);
   float rim = pow(1.0 - ndv, u_atmo1.x);
   float edge = clamp((Ra - closest) / max(fwidth(closest), 1e-4) + 0.5, 0.0, 1.0);
-  float a = u_atmo.w * rim * edge;
+  float ns = dot(n, u_sun.xyz);
+  float day = day_factor(n);
+  float a = u_atmo.w * rim * edge * mix(0.15, 1.0, day);
   if (a <= 1e-4) discard;
-  o_color = vec4(u_atmo.rgb * a, a);
+  float band = 1.0 - smoothstep(0.0, 2.5 * u_sun.w, abs(ns));  // 1 on the terminator
+  vec3 col = mix(u_atmo.rgb, u_lights.rgb, u_rim.x * band);
+  o_color = vec4(col * a, a);
 }

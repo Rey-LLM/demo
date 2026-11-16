@@ -12,6 +12,7 @@
 // Exits with 77 (ctest SKIP) when no OpenGL 4.5 context can be created.
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -21,6 +22,7 @@
 
 #include <glm/geometric.hpp>
 #include <glm/mat4x4.hpp>
+#include <glm/matrix.hpp>
 
 #include "app/camera_presets.hpp"
 #include "app/render_config.hpp"
@@ -30,6 +32,8 @@
 #include "layout/layout_engine.hpp"
 #include "layout/layout_params.hpp"
 #include "model/edge_aggregation.hpp"
+#include "model/cables.hpp"
+#include "model/citylights.hpp"
 #include "model/globe.hpp"
 #include "model/graph_builder.hpp"
 #include "model/hub_taxonomy.hpp"
@@ -365,7 +369,7 @@ int main() {
 
     // ---- frame 2: a replay time with no whale in flight -> emissive is black ----
     {
-      std::fprintf(stderr, "[ RUN  ] render: emissive is only the hub glow when no whale is active\n");
+      std::fprintf(stderr, "[ RUN  ] render: emissive is black when no whale is active (v4: hubs do not glow)\n");
       const int before = ftv::test::failure_count();
       // First replay time at which no event is in flight or flashing.
       const float life = th.whale_flight_s + th.whale_flash_s + 0.05f;
@@ -383,9 +387,9 @@ int main() {
       std::fprintf(stderr, "  replay t=%.3f s, %d emissive px around hub markers, %d elsewhere, active whales %u\n",
                    static_cast<double>(quiet), hubPx, stray, renderer.counters().active_whales);
       CHECK(stray == 0);
-      CHECK(hubPx > 0);  // the hubs glow
+      CHECK(hubPx == 0);  // v4: only whales and liquidations reach the emissive target
       CHECK(renderer.counters().active_whales == 0);
-      std::fprintf(stderr, "[ %s ] render: emissive is only the hub glow when no whale is active\n",
+      std::fprintf(stderr, "[ %s ] render: emissive is black when no whale is active (v4: hubs do not glow)\n",
                    ftv::test::failure_count() == before ? " OK " : "FAIL");
       ++ran;
     }
@@ -561,6 +565,231 @@ int main() {
       CHECK(renderer.counters().draw_calls == draws);
       liveTime = 0.0f;
       std::fprintf(stderr, "[ %s ] render: a live whale arc is emissive along its hub-to-hub arc only\n",
+                   ftv::test::failure_count() == before ? " OK " : "FAIL");
+      ++ran;
+    }
+  }
+  // ---- v4 earth layers: terminator, city lights, cables -------------------------------
+  {
+    CoastlineSet coast;
+    CHECK(load_coastlines(src + "/assets", coast, err));
+    // Synthetic assets: a uniformly lit city-light map (every texel 255) and
+    // one cable along the equator from 0 to 120 degrees east.
+    CityLights lights;
+    lights.width = 64;
+    lights.height = 32;
+    lights.levels = 1;
+    lights.bc4.assign(CityLights::level_bytes(64, 32, 0), 0);
+    for (std::size_t b = 0; b < lights.bc4.size(); b += 8) {
+      lights.bc4[b] = 255;
+      lights.bc4[b + 1] = 255;
+    }
+    CableSet cables;
+    for (int k = 0; k <= 24; ++k) {
+      cables.latlon.push_back(0.0f);
+      cables.latlon.push_back(static_cast<float>(k) * 5.0f);
+    }
+    cables.cables.push_back({0, 25, CableCorridor::Other});
+    Renderer renderer(sc.graph, *sc.tax, sc.whales, coast, sc.rs, ctx.caps(), src + "/shaders");
+    EarthAssets earth;
+    earth.cables = &cables;
+    earth.lights = &lights;
+    renderer.set_earth(earth);
+    if (!renderer.init(err)) {
+      std::fprintf(stderr, "renderer: %s\n", err.c_str());
+      return 1;
+    }
+    renderer.prime_positions(engine.snapshots().front());
+    const NodePositionFn pos = [&renderer](std::uint32_t n) { return renderer.node_world_position(n); };
+    OrbitCamera camera;
+    camera.configure(sc.rs.camera_fov_deg, sc.rs.camera_near, sc.rs.camera_damping);
+    const float aspect = static_cast<float>(kWidth) / static_cast<float>(kHeight);
+    ViewSetup v;
+    CHECK(camera_preset("globe", *sc.tax, sc.whales, pos, sc.rs, v, err));
+    camera.set_immediate(v.target, v.distance, v.yaw, v.pitch);
+    // A time with no dataset whale in flight.
+    const float life = sc.rs.theme.whale_flight_s + sc.rs.theme.whale_flash_s + 0.05f;
+    float quiet = -1.0f;
+    for (float t = 0.05f; t < sc.whales.replay_seconds && quiet < 0.0f; t += 0.05f) {
+      bool busy = false;
+      for (const WhaleEvent& ev : sc.whales.events) busy = busy || (t >= ev.start - 0.05f && t < ev.start + life);
+      if (!busy) quiet = t;
+    }
+    const glm::mat4 view = camera.view(), proj = camera.projection(aspect);
+    const glm::mat4 invVp = glm::inverse(proj * view);
+    const glm::vec3 eye = camera.position();
+    const glm::vec3 toCam = glm::normalize(eye);
+    const glm::vec3 right = glm::normalize(glm::vec3(glm::inverse(view)[0]));
+    auto draw = [&](std::uint32_t layers, glm::vec3 sun, std::vector<std::uint8_t>& out) {
+      for (int f = 0; f < 3; ++f) {
+        renderer.begin_frame(engine.snapshots());
+        FrameParams p;
+        p.view = view;
+        p.proj = proj;
+        p.camera_pos = eye;
+        p.time = quiet;
+        p.near_plane = camera.near_plane();
+        p.width = kWidth;
+        p.height = kHeight;
+        p.show_hud = false;
+        p.present = false;
+        p.layers = layers;
+        p.sun_dir = sun;
+        renderer.draw_frame(p);
+      }
+      int w = 0, h = 0;
+      return renderer.read_output_rgba8(out, w, h) && w == kWidth && h == kHeight;
+    };
+    // Globe normal under a pixel (CPU ray cast, as in globe.frag), or false off the disk.
+    const float R = sc.rs.globe.radius;
+    auto normal_at = [&](int x, int y, glm::vec3& n) {
+      const glm::vec2 ndc((static_cast<float>(x) + 0.5f) / kWidth * 2.0f - 1.0f,
+                          1.0f - (static_cast<float>(y) + 0.5f) / kHeight * 2.0f);
+      const glm::vec4 pa = invVp * glm::vec4(ndc, 1.0f, 1.0f), pb = invVp * glm::vec4(ndc, 0.5f, 1.0f);
+      const glm::vec3 rd = glm::normalize(glm::vec3(pb) / pb.w - glm::vec3(pa) / pa.w);
+      const float b = glm::dot(eye, rd), c = glm::dot(eye, eye) - R * R, disc = b * b - c;
+      if (disc < 0.0f) return false;
+      const float t = -b - std::sqrt(disc);
+      if (t <= 0.0f) return false;
+      n = (eye + rd * t) / R;
+      return true;
+    };
+    const float tw = sc.rs.theme.twilight;
+    auto day_factor = [&](const glm::vec3& n, const glm::vec3& sun) {
+      const float x = std::clamp((glm::dot(n, sun) + tw) / (2.0f * tw), 0.0f, 1.0f);
+      return x * x * (3.0f - 2.0f * x);
+    };
+    auto luma = [](const std::vector<std::uint8_t>& img, std::size_t i) {
+      return 0.2126f * img[i] + 0.7152f * img[i + 1] + 0.0722f * img[i + 2];
+    };
+
+    {
+      std::fprintf(stderr, "[ RUN  ] render: day side is Day Tint, night side Obsidian, night darker\n");
+      const int before = ftv::test::failure_count();
+      std::vector<std::uint8_t> day, night;
+      CHECK(draw(0u, toCam, day));
+      CHECK(draw(0u, -toCam, night));
+      double sumD = 0.0, sumN = 0.0;
+      int disk = 0, dayTint = 0, obsidian = 0;
+      for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+          glm::vec3 n;
+          if (!normal_at(x, y, n) || glm::dot(n, toCam) < 0.3f) continue;
+          const std::size_t i = (static_cast<std::size_t>(y) * kWidth + static_cast<std::size_t>(x)) * 4;
+          ++disk;
+          sumD += luma(day, i);
+          sumN += luma(night, i);
+          // Away from graticule and coastline hairlines the base shows through.
+          if (std::abs(day[i] - 0x0B) <= 2 && std::abs(day[i + 1] - 0x0E) <= 2 && std::abs(day[i + 2] - 0x13) <= 2) ++dayTint;
+          if (std::abs(night[i] - 0x05) <= 2 && std::abs(night[i + 1] - 0x06) <= 2 && std::abs(night[i + 2] - 0x08) <= 2) ++obsidian;
+        }
+      }
+      std::fprintf(stderr, "  %d disk px: mean luma day %.2f, night %.2f; %d px Day Tint, %d px Obsidian\n", disk,
+                   sumD / std::max(disk, 1), sumN / std::max(disk, 1), dayTint, obsidian);
+      CHECK(disk > 20000);
+      CHECK(sumN < sumD);
+      CHECK(dayTint * 2 > disk);
+      CHECK(obsidian * 2 > disk);
+      std::fprintf(stderr, "[ %s ] render: day side is Day Tint, night side Obsidian, night darker\n",
+                   ftv::test::failure_count() == before ? " OK " : "FAIL");
+      ++ran;
+    }
+
+    {
+      std::fprintf(stderr, "[ RUN  ] render: city lights only on the night side (d < 0.5), never emissive\n");
+      const int before = ftv::test::failure_count();
+      // Sun to the camera's right: the terminator splits the disk vertically.
+      std::vector<std::uint8_t> on, off;
+      CHECK(draw(kLayerLights, right, on));
+      std::vector<float> em;
+      int ew = 0, eh = 0;
+      float peak = 0.0f;
+      CHECK(renderer.read_emissive(em, ew, eh));
+      for (float c : em) peak = std::max(peak, c);
+      CHECK(draw(0u, right, off));
+      int lit = 0, wrongSide = 0, notWarm = 0;
+      for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+          const std::size_t i = (static_cast<std::size_t>(y) * kWidth + static_cast<std::size_t>(x)) * 4;
+          if (luma(on, i) - luma(off, i) < 4.0f) continue;
+          ++lit;
+          glm::vec3 n;
+          if (!normal_at(x, y, n) || day_factor(n, right) >= 0.5f) ++wrongSide;
+          const int dr = on[i] - off[i], dg = on[i + 1] - off[i + 1], db = on[i + 2] - off[i + 2];
+          if (!(dr >= dg && dg >= db)) ++notWarm;  // what the lights add is Night Lights (warm)
+        }
+      }
+      std::fprintf(stderr, "  %d lit px, %d where d >= 0.5, %d not warm; emissive peak %.4f\n", lit, wrongSide, notWarm,
+                   static_cast<double>(peak));
+      CHECK(lit > 5000);
+      CHECK(wrongSide == 0);
+      CHECK(notWarm == 0);
+      CHECK(peak <= 1e-3f);
+      std::fprintf(stderr, "[ %s ] render: city lights only on the night side (d < 0.5), never emissive\n",
+                   ftv::test::failure_count() == before ? " OK " : "FAIL");
+      ++ran;
+    }
+
+    {
+      std::fprintf(stderr, "[ RUN  ] render: cables are thin amber hairlines in one draw, not emissive\n");
+      const int before = ftv::test::failure_count();
+      std::vector<std::uint8_t> with, without;
+      CHECK(draw(kLayerCables, toCam, with));
+      const std::uint32_t drawsWith = renderer.counters().draw_calls;
+      CHECK(renderer.counters().cable_segments == 24);
+      std::vector<float> em;
+      int ew = 0, eh = 0;
+      float peak = 0.0f;
+      CHECK(renderer.read_emissive(em, ew, eh));
+      for (float c : em) peak = std::max(peak, c);
+      CHECK(draw(0u, toCam, without));
+      CHECK(renderer.counters().draw_calls == drawsWith);
+      CHECK(renderer.counters().cable_segments == 0);
+      int changed = 0, tooBright = 0, cold = 0;
+      for (std::size_t i = 0; i + 3 < with.size(); i += 4) {
+        const int dr = with[i] - without[i], dg = with[i + 1] - without[i + 1], db = with[i + 2] - without[i + 2];
+        if (std::abs(dr) + std::abs(dg) + std::abs(db) < 4) continue;
+        ++changed;
+        if (std::max({with[i], with[i + 1], with[i + 2]}) > 110) ++tooBright;  // alpha <= 0.16 over the base
+        if (!(dr >= dg && dg >= db)) ++cold;
+      }
+      std::fprintf(stderr, "  %d cable px (%d too bright, %d not warm), emissive peak %.4f\n", changed, tooBright, cold,
+                   static_cast<double>(peak));
+      CHECK(changed > 100);
+      CHECK(changed < kWidth * 6);  // a hairline, not a band
+      CHECK(tooBright == 0);
+      CHECK(cold * 50 <= changed);
+      CHECK(peak <= 1e-3f);
+      std::fprintf(stderr, "[ %s ] render: cables are thin amber hairlines in one draw, not emissive\n",
+                   ftv::test::failure_count() == before ? " OK " : "FAIL");
+      ++ran;
+    }
+
+    {
+      std::fprintf(stderr, "[ RUN  ] render: all layers at the terminator use at most 6 hue clusters\n");
+      const int before = ftv::test::failure_count();
+      std::vector<std::uint8_t> img;
+      CHECK(draw(0xFFFFFFFFu, right, img));
+      std::array<int, 36> bins{};
+      int colored = 0;
+      for (std::size_t i = 0; i + 3 < img.size(); i += 4) {
+        float h = 0.0f, s = 0.0f, val = 0.0f;
+        to_hsv(img[i], img[i + 1], img[i + 2], h, s, val);
+        if (s < 0.3f || val < 0.1f) continue;
+        ++bins[static_cast<std::size_t>(h / 10.0f) % 36];
+        ++colored;
+      }
+      int clusters = 0;
+      const int minBin = std::max(1, colored / 200);
+      for (std::size_t b = 0; b < 36; ++b) {
+        const bool on = bins[b] >= minBin, prevOn = bins[(b + 35) % 36] >= minBin;
+        if (on && !prevOn) ++clusters;
+      }
+      if (clusters == 0 && colored > 0) clusters = 1;  // one run around the whole wheel
+      std::fprintf(stderr, "  %d coloured px in %d hue clusters\n", colored, clusters);
+      CHECK(colored > 0);
+      CHECK(clusters <= 6);
+      std::fprintf(stderr, "[ %s ] render: all layers at the terminator use at most 6 hue clusters\n",
                    ftv::test::failure_count() == before ? " OK " : "FAIL");
       ++ran;
     }

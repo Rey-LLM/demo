@@ -56,6 +56,15 @@ std::unique_ptr<LiveSession> LiveSession::create(const LiveSessionOptions& opts,
     if (!load_corridors(path, taxonomy, corridors, error)) return nullptr;
   }
   LiveModelConfig modelCfg = make_model_config(s->config_, taxonomy, std::move(corridors));
+  if (!s->config_.sessions.empty()) {
+    std::string serr;
+    if (auto cal = load_sessions(resolve(opts.base_dir, s->config_.sessions), taxonomy, serr)) {
+      s->sessions_ = std::make_shared<const SessionCalendar>(std::move(*cal));
+      modelCfg.sessions = s->sessions_;
+    } else {
+      FTV_LOG_WARN("[live] trading sessions off (corridors at the BIS daily mean): %s", serr.c_str());
+    }
+  }
 
   // The capture: required for --replay, optional as the fallback for --live.
   if (opts.mode != ModelMode::Dataset) {

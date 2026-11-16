@@ -3,20 +3,23 @@
 // draw calls every frame, whatever the size of the graph:
 //
 //   scene (8x MSAA, RGBA16F colour + RGBA16F emissive MRT + 32F depth)
-//     Pass 1  globe + graticule  glDrawArrays(GL_TRIANGLES, 0, 3)            fullscreen ray cast
-//     Pass 1b atmosphere rim     glDrawArrays(GL_TRIANGLES, 0, 3)            sphere impostor, scene only
-//     Pass 1c coastlines         glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, segments)
+//     Pass 1  globe, graticule,  glDrawArrays(GL_TRIANGLES, 0, 3)            fullscreen ray cast
+//             city lights (night side, BC4, scene attachment, HDR <= 1.5)
+//     Pass 1b atmosphere rim     glDrawArrays(GL_TRIANGLES, 0, 3)            day-side limb + twilight tint
+//     Pass 1c coastlines         glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, segments)  50 % at night
+//     Pass 1d submarine cables   glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, cable segments)
 //     Pass 2  nodes              glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, N)
 //     Pass 3  arcs               glDrawArraysInstanced(LINES, 0, 2, intra)
 //                                glDrawArraysInstanced(LINE_STRIP, 0, S+1, inter)
-//     Pass 4  whales (emissive)  glDrawArraysInstanced(TRIANGLE_STRIP, 0, 2(S+1), 2(W+L))
+//     Pass 4  whales + flows     glDrawArraysInstanced(TRIANGLE_STRIP, 0, 2(128+1), 2(W+L))
+//             (live arcs follow MODELED cable routes where one exists)
 //     Pass 5  hub markers+labels glDrawArraysInstanced(TRIANGLE_STRIP, 0, 4, H+G)
 //     Pass 6  picking            glDrawArraysInstanced (only on click)
 //   post
 //     MSAA resolve (2 blits), bloom on the emissive attachment only:
-//     3 dual-filter downsamples + 2 upsamples, composite (ACES fitted),
-//     HUD, present: all fullscreen glDrawArrays(GL_TRIANGLES, 0, 3) or one
-//     instanced HUD draw.
+//     6 dual-filter (Kawase) downsamples + 5 upsamples, composite (day/night
+//     base, ACES fitted), HUD, present: all fullscreen
+//     glDrawArrays(GL_TRIANGLES, 0, 3) or one instanced HUD draw.
 // No glDrawElements*, no indirect draws.
 //
 // Per-frame CPU work: one fence wait, an optional chunk of a new layout
@@ -34,6 +37,8 @@
 
 #include "core/triple_buffer.hpp"
 #include "layout/layout_engine.hpp"
+#include "model/cables.hpp"
+#include "model/citylights.hpp"
 #include "model/globe.hpp"
 #include "model/graph.hpp"
 #include "model/hub_taxonomy.hpp"
@@ -63,6 +68,7 @@ struct FrameParams {
   std::uint32_t layers = 0xFFFFFFFFu;  // kLayer* bits; a disabled layer issues its draw with 0 instances
   int hovered_hub = -1;
   int pinned_hub = -1;
+  glm::vec3 sun_dir{0.0f, 0.0f, 1.0f};  // unit vector toward the sun (globe frame), see model/solar.hpp
 };
 
 // Layer bits for FrameParams::layers (mirrored in common.glsl).
@@ -72,6 +78,8 @@ inline constexpr std::uint32_t kLayerNodes = 4u;
 inline constexpr std::uint32_t kLayerArcs = 8u;
 inline constexpr std::uint32_t kLayerWhales = 16u;
 inline constexpr std::uint32_t kLayerHubs = 32u;
+inline constexpr std::uint32_t kLayerCables = 64u;
+inline constexpr std::uint32_t kLayerLights = 128u;
 
 // One live arc slot (hub to hub, on the live clock): a whale (tier 1..3) or
 // a flow trail (tier 0: dim, thin, deep amber, no destination flash).
@@ -81,6 +89,14 @@ struct LiveArcSlot {
 };
 static_assert(sizeof(LiveArcSlot) == 32);
 
+// Earth layers, optional: without them the globe keeps its terminator and
+// the cable / city-light passes draw 0 instances / sample a black texel.
+struct EarthAssets {
+  const CableSet* cables = nullptr;
+  const RouteTable* routes = nullptr;
+  const CityLights* lights = nullptr;
+};
+
 struct RenderCounters {
   std::uint32_t visible_intra = 0;  // intra arcs submitted this frame
   std::uint32_t visible_inter = 0;
@@ -89,6 +105,7 @@ struct RenderCounters {
   std::uint32_t draw_calls = 0;     // total
   std::uint32_t active_whales = 0;  // whale events in flight or flashing (CPU-side count, incl. live arcs)
   std::uint32_t coast_segments = 0; // coastline segments submitted this frame
+  std::uint32_t cable_segments = 0; // submarine cable segments submitted this frame
   std::uint64_t snapshot_iteration = 0;
   std::uint64_t snapshots_uploaded = 0;
   float fence_wait_ms = 0.0f;  // CPU time blocked on the frame-slot fence (GPU-bound time)
@@ -98,7 +115,8 @@ struct RenderCounters {
 class Renderer {
  public:
   static constexpr unsigned kSlots = 3;
-  static constexpr int kBloomLevels = 3;   // two mips tighter than v1: a sharper whale glow
+  static constexpr int kBloomLevels = 6;   // 6-mip dual-filter (Kawase) chain on the emissive attachment
+  static constexpr int kWhaleSegments = 128;  // ribbon segments per whale / routed arc
   static constexpr std::uint32_t kLiveArcSlots = 256;  // live whale arcs and flow trails drawn concurrently
   static constexpr std::uint32_t kMaxVisibleEdges = 2000000;  // hard cap on drawn edges per frame
   // Most bytes of a layout snapshot copied into the position ring per frame,
@@ -111,6 +129,8 @@ class Renderer {
   Renderer(const Renderer&) = delete;
   Renderer& operator=(const Renderer&) = delete;
 
+  // Call before init(); the pointers must outlive init() only.
+  void set_earth(const EarthAssets& earth) noexcept { earth_ = earth; }
   bool init(std::string& error);
 
   // Frame protocol: begin_frame() waits for the slot fence and consumes the
@@ -170,6 +190,8 @@ class Renderer {
     glm::vec4 atmo1;
     glm::uvec4 pick;
     glm::vec4 gold_hot;
+    glm::vec4 sun, day, lights, cable, rim;
+    glm::uvec4 routes;
   };
 
   bool create_programs(std::string& error);
@@ -192,7 +214,7 @@ class Renderer {
   gl::Program prog_globe_, prog_node_, prog_arc_, prog_whale_, prog_hub_, prog_pick_, prog_hud_;
   gl::Program prog_down_, prog_up_, prog_composite_, prog_present_;
   GLint loc_arc_inter_ = -1, loc_arc_first_ = -1, loc_arc_segments_ = -1, loc_whale_segments_ = -1;
-  GLint loc_coast_first_ = -1;
+  GLint loc_coast_first_ = -1, loc_coast_color_ = -1, loc_coast_night_ = -1;
   GLint loc_down_texel_ = -1, loc_up_texel_ = -1;
   GLint loc_comp_bg_ = -1, loc_comp_exposure_ = -1, loc_comp_bloom_ = -1, loc_comp_vignette_ = -1;
   GLint loc_present_encode_ = -1;
@@ -208,6 +230,9 @@ class Renderer {
   gl::Buffer labels_;
   gl::Buffer whales_buf_;
   gl::Buffer coast_buf_;
+  gl::Buffer cable_buf_;
+  gl::Buffer route_index_, route_points_;
+  gl::Texture lights_tex_;
   gl::Texture label_atlas_;
 
   // Persistently mapped rings.
@@ -256,6 +281,10 @@ class Renderer {
   std::size_t node_count_ = 0;
   std::size_t whale_count_ = 0;
   std::uint32_t coast_coarse_ = 0, coast_fine_ = 0;
+  std::uint32_t cable_count_ = 0;
+  std::uint32_t route_hubs_ = 0;
+  bool lights_loaded_ = false;
+  EarthAssets earth_;
   std::uint32_t label_glyphs_ = 0;
   std::uint32_t intra_count_ = 0, inter_count_ = 0;
   std::uint32_t intra_lod_ = 0, inter_lod_ = 0;

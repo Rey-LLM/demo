@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -16,6 +17,7 @@
 #include "model/feed_config.hpp"
 #include "model/globe.hpp"
 #include "model/live_model.hpp"
+#include "model/sessions.hpp"
 #include "render/camera.hpp"
 #include "test_framework.hpp"
 #include "test_util.hpp"
@@ -460,7 +462,10 @@ TEST_CASE("replay: the bundled capture matches the shipped configuration and see
     CHECK(!c.source_url.empty());
     CHECK(!c.as_of_date.empty());
   }
-  const LiveModelConfig cfg = make_model_config(*feeds, *tax, corridors);
+  LiveModelConfig cfg = make_model_config(*feeds, *tax, corridors);
+  auto cal = load_sessions(kSrc + "/config/sessions.json", *tax, err);
+  REQUIRE(cal.has_value());
+  cfg.sessions = std::make_shared<const SessionCalendar>(std::move(*cal));
   Capture cap;
   REQUIRE(cap.load(kSrc + "/assets/replay/default.ftxcap", cfg, err));
   CHECK(cap.synthetic());  // generated, and flagged as such

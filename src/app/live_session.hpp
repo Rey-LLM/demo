@@ -12,6 +12,7 @@
 #include "model/capture.hpp"
 #include "model/feed_config.hpp"
 #include "model/hub_taxonomy.hpp"
+#include "model/sessions.hpp"
 
 namespace ftv {
 
@@ -40,6 +41,8 @@ class LiveSession {
   ModelThread& model() noexcept { return *model_; }
   [[nodiscard]] const LiveFeeds* feeds() const noexcept { return feeds_.get(); }
   [[nodiscard]] const FeedsConfig& config() const noexcept { return config_; }
+  // Trading sessions (null when config/sessions.json failed to load).
+  [[nodiscard]] const SessionCalendar* sessions() const noexcept { return sessions_.get(); }
   [[nodiscard]] const Capture* capture() const noexcept { return capture_loaded_ ? &capture_ : nullptr; }
   [[nodiscard]] const std::string& capture_path() const noexcept { return capture_path_; }
   ExportService& exporter() noexcept { return *exporter_; }
@@ -59,6 +62,7 @@ class LiveSession {
 
   LiveSessionOptions opts_;
   const HubTaxonomy* taxonomy_ = nullptr;
+  std::shared_ptr<const SessionCalendar> sessions_;
   FeedsConfig config_;
   Capture capture_;
   bool capture_loaded_ = false;

@@ -1,5 +1,6 @@
 #version 450 core
-// Coastlines (Natural Earth 1:110m, 1:50m at close zoom): one instanced draw,
+// Coastlines (Natural Earth 1:110m, 1:50m at close zoom) and, with the cable
+// buffer bound to SSBO 11, submarine cables: one instanced draw each,
 // one instance per segment, GL_TRIANGLE_STRIP with 4 vertices. Endpoints are
 // fetched from SSBO 11 as lat/lon, projected onto the sphere at
 // R * 1.0005 (clear of the globe's depth, no z-fighting) and expanded into a
@@ -13,8 +14,11 @@ struct Segment {
 layout(std430, binding = 11) readonly buffer Coast { Segment coast[]; };
 
 uniform uint u_first;  // first segment of the active level of detail
+uniform vec4 u_color;  // rgb line colour, w alpha (coastline or cable)
+uniform float u_night; // alpha factor on the night side (coastlines 0.5, cables 1)
 
 out float v_side;       // signed distance from the line centre (px)
+flat out vec3 v_rgb;
 flat out float v_alpha;
 
 vec3 geo(float latDeg, float lonDeg) {
@@ -33,7 +37,8 @@ void main() {
   vec3 n = second ? nb : na;
   // Back-hemisphere fade: N.V from 0.12 down to 0 takes the segment out.
   float ndv = dot(n, normalize(u_camera.xyz - p));
-  v_alpha = u_coast.w * smoothstep(0.0, 0.12, ndv);
+  v_alpha = u_color.w * smoothstep(0.0, 0.12, ndv) * mix(u_night, 1.0, day_factor(n));
+  v_rgb = u_color.rgb;
   vec4 ca = u_view_proj * vec4(a, 1.0);
   vec4 cb = u_view_proj * vec4(b, 1.0);
   if (v_alpha <= 0.0 || ca.w <= u_shape1.w || cb.w <= u_shape1.w) {

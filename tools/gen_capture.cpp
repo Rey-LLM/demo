@@ -14,19 +14,26 @@
 //   COINBASE    BTC/ETH/SOL trades against USD, EUR and GBP, ~14/s
 //   KRAKEN      BTC/ETH/SOL trades against USD, EUR, GBP and JPY, ~8/s
 //   BINANCE     BTC/ETH/SOL trades against USDT and EUR, ~16/s
+//   OKX         BTC/ETH/SOL trades against USDT, ~10/s (v4)
+//   BINANCE_LIQ USD-M forced liquidations, ~1 every 4 s, a few large (v4)
+//   OKX         SWAP liquidation orders, ~1 every 6 s (v4)
 // plus a handful of placed large trades so that every tier of whale occurs.
+// On-chain transactions carry synthetic address fragments for the tape.
+// The v4 streams draw from a second generator (seed + 1), so the v3 streams
+// are unchanged.
 // Prices: BTC 60,000, ETH 3,000, SOL 150 USD with a small random walk; EUR
 // 1.08, GBP 1.27, JPY 0.0067, USDT 1.0 USD (illustrative constants).
 //
 // Usage: gen_capture --out assets/replay/default.ftxcap [--seed S] [--seconds N]
 //                    [--hubs config/hubs.json] [--feeds config/feeds.json]
-//                    [--baseline config/flows_baseline.csv]
+//                    [--baseline config/flows_baseline.csv] [--sessions config/sessions.json]
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -34,6 +41,7 @@
 #include "model/capture.hpp"
 #include "model/feed_config.hpp"
 #include "model/hub_taxonomy.hpp"
+#include "model/sessions.hpp"
 
 namespace {
 
@@ -115,7 +123,37 @@ void trade(Ctx& c, FeedId f, Asset base, Asset quote, bool buy, std::int64_t rel
   e.src_hub = buy ? fiat : chain;
   e.dst_hub = buy ? chain : fiat;
   if (buy) e.flags |= kEvBuy;
+  set_quote(e, quote);
   c.out.push_back(e);
+}
+
+// Forced liquidation (USD-M / SWAP): the order side closes the opposite
+// position (buy: a SHORT was liquidated). Shown on the tape, valued in USD.
+void liquidation(Ctx& c, FeedId f, Asset base, bool buy, std::int64_t relMs, double usd) {
+  LiveEvent e = base_event(c, f, EventKind::Liquidation, base, relMs);
+  const double baseUsd = c.px[static_cast<std::size_t>(base)];
+  e.amount = usd / baseUsd;
+  e.price = baseUsd;
+  e.usd_value = usd;
+  const std::uint16_t chain = chain_hub(c, base);
+  const std::uint16_t fiat = c.feeds.quote_hub[static_cast<std::size_t>(Asset::USDT)];
+  e.src_hub = buy ? fiat : chain;
+  e.dst_hub = buy ? chain : fiat;
+  if (buy) e.flags |= kEvBuy;
+  set_quote(e, Asset::USDT);
+  c.out.push_back(e);
+}
+
+void address_tags(Rng& rng, LiveEvent& e, bool evm) {
+  static constexpr char kHex[] = "0123456789abcdef";
+  static constexpr char kB58[] = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+  auto fill = [&](char* tag) {
+    for (int i = 0; i < 4; ++i) {
+      tag[i] = evm ? kHex[rng.next() % 16] : kB58[rng.next() % (sizeof(kB58) - 1)];
+    }
+  };
+  fill(e.from_tag);
+  fill(e.to_tag);
 }
 
 const char* arg(int argc, char** argv, const char* name, const char* def) {
@@ -134,6 +172,7 @@ int main(int argc, char** argv) {
   const std::string hubsPath = arg(argc, argv, "--hubs", "config/hubs.json");
   const std::string feedsPath = arg(argc, argv, "--feeds", "config/feeds.json");
   const std::string basePath = arg(argc, argv, "--baseline", "config/flows_baseline.csv");
+  const std::string sessionsPath = arg(argc, argv, "--sessions", "config/sessions.json");
 
   std::string err;
   auto tax = HubTaxonomy::load(hubsPath, err);
@@ -151,7 +190,13 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "gen_capture: %s\n", err.c_str());
     return 1;
   }
-  const LiveModelConfig modelCfg = make_model_config(*feeds, *tax, corridors);
+  LiveModelConfig modelCfg = make_model_config(*feeds, *tax, corridors);
+  if (auto cal = load_sessions(sessionsPath, *tax, err)) {
+    modelCfg.sessions = std::make_shared<const SessionCalendar>(std::move(*cal));
+  } else {
+    std::fprintf(stderr, "gen_capture: %s\n", err.c_str());
+    return 1;
+  }
 
   Ctx c;
   c.feeds = *feeds;
@@ -253,6 +298,50 @@ int main(int argc, char** argv) {
   if (D > 40000) {
     at(40000);
     chain_tx(c, FeedId::BtcMempool, Asset::BTC, 40000, 52.0);  // ~3.1 M USD on-chain, tier 3
+  }
+
+  // ---- v4 streams (second generator) ----------------------------------------
+  Rng rng4(seed + 1);
+  for (LiveEvent& e : c.out) {
+    if (e.kind == EventKind::Transaction) address_tags(rng4, e, e.feed == FeedId::Eth);
+  }
+  // OKX spot trades against USDT.
+  for (double t = rng4.exponential(100.0); t < static_cast<double>(D); t += rng4.exponential(100.0)) {
+    const auto rel = static_cast<std::int64_t>(t);
+    at(rel);
+    const double ub = rng4.uniform();
+    const Asset base = ub < 0.5 ? Asset::BTC : ub < 0.8 ? Asset::ETH : Asset::SOL;
+    trade(c, FeedId::Okx, base, Asset::USDT, rng4.uniform() < 0.5, rel, rng4.lognormal(1100.0, 1.9));
+  }
+  // Liquidations: Binance USD-M and OKX SWAP.
+  for (double t = rng4.exponential(4000.0); t < static_cast<double>(D); t += rng4.exponential(4000.0)) {
+    const auto rel = static_cast<std::int64_t>(t);
+    at(rel);
+    const Asset base = rng4.uniform() < 0.6 ? Asset::BTC : Asset::ETH;
+    liquidation(c, FeedId::BinanceLiq, base, rng4.uniform() < 0.45, rel, rng4.lognormal(25000.0, 1.6));
+  }
+  for (double t = rng4.exponential(6000.0); t < static_cast<double>(D); t += rng4.exponential(6000.0)) {
+    const auto rel = static_cast<std::int64_t>(t);
+    at(rel);
+    const Asset base = rng4.uniform() < 0.55 ? Asset::BTC : rng4.uniform() < 0.7 ? Asset::ETH : Asset::SOL;
+    liquidation(c, FeedId::Okx, base, rng4.uniform() < 0.5, rel, rng4.lognormal(18000.0, 1.6));
+  }
+  // Placed large liquidations (whale tiers on the liquidation tape).
+  const struct {
+    std::int64_t rel;
+    FeedId feed;
+    Asset base;
+    bool buy;
+    double usd;
+  } placedLiq[] = {
+      {14000, FeedId::BinanceLiq, Asset::BTC, false, 1.8e6},  // long liquidated, tier 2
+      {52000, FeedId::Okx, Asset::ETH, true, 0.45e6},         // short liquidated, tier 1
+      {81000, FeedId::BinanceLiq, Asset::ETH, true, 3.4e6},   // short liquidated, tier 3
+  };
+  for (const auto& p : placedLiq) {
+    if (p.rel >= D) continue;
+    at(p.rel);
+    liquidation(c, p.feed, p.base, p.buy, p.rel, p.usd);
   }
 
   std::stable_sort(c.out.begin(), c.out.end(), [](const LiveEvent& a, const LiveEvent& b) { return a.ts_ms < b.ts_ms; });

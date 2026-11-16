@@ -172,6 +172,7 @@ std::optional<FeedsConfig> load_feeds_config(const std::string& path, const HubT
   if (const JsonValue* fm = root->find("fiat_model")) {
     c.fiat_enabled = fm->bool_or("enabled", true);
     c.fiat_baseline = fm->string_or("baseline", c.fiat_baseline);
+    c.sessions = fm->string_or("sessions", c.sessions);
   }
   fiat.enabled = c.fiat_enabled;
   return c;

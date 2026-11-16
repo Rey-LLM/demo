@@ -224,9 +224,9 @@ RouteTable build_routes(const CableSet& cables, const std::vector<HubSite>& hubs
       near.emplace_back(angle(node[hubNode[h]], node[l]), l);
     }
     std::sort(near.begin(), near.end());
-    const double lim = opt.backhaul_km / kEarthKm;
+    const double lim = opt.backhaul_km / kEarthKm, hardLim = opt.backhaul_max_km / kEarthKm;
     for (std::size_t k = 0; k < near.size(); ++k) {
-      if (near[k].first > lim && k >= opt.backhaul_min) break;
+      if ((near[k].first > lim && k >= opt.backhaul_min) || near[k].first > hardLim) break;
       link(hubNode[h], near[k].second, near[k].first);
     }
   }

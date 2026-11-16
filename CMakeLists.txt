@@ -274,6 +274,7 @@ add_library(ftviz_model STATIC
   src/model/solar.cpp
   src/model/sessions.cpp
   src/model/cables.cpp
+  src/model/citylights.cpp
   src/ingest/live/endpoint_pool.cpp
   src/ui/command_bar.cpp)
 ftviz_target_defaults(ftviz_model)
@@ -386,6 +387,7 @@ if(FTVIZ_BUILD_TESTS)
     tests/test_live.cpp
     tests/test_model.cpp
     tests/test_export.cpp
+    tests/test_v4.cpp
     src/app/interaction.cpp
     src/render/camera.cpp)
   ftviz_executable_defaults(ftviz_tests)

@@ -4,7 +4,16 @@
 // analytic anti-aliasing: the distance to the nearest grid line, measured in
 // pixels through screen-space derivatives, gives the coverage of a 1 px line.
 // The limb gets a faint 1 px ink hairline.
+//
+// v4: day/night. The base colour of the sphere (Day Tint on the sunlit side,
+// Obsidian at night) is mixed in the composite pass, display-referred, so
+// the theme hexes come out exact. This pass adds the city lights on the
+// night side: a log-toned BC4 map (NASA Black Marble) in Night Lights, HDR
+// at most u_lights.w (1.5), written to the scene attachment only (never
+// bloomed), zero where d >= 0.5, d = smoothstep(-t, t, N.sun).
 #include "common.glsl"
+
+layout(binding = 3) uniform sampler2D u_city;  // R: log-toned radiance [0, 1]
 
 in vec2 v_uv;
 layout(location = 0) out vec4 o_color;
@@ -48,7 +57,29 @@ void main() {
   // so this is what shows where it occludes the arcs behind it.
   const float kLimbAlpha = 0.30;
   float limb = kLimbAlpha * clamp(1.0 - ndv / max(fwidth(ndv), 1e-6), 0.0, 1.0);
-  o_color = vec4(u_amber.rgb * a + u_ink.rgb * limb, a + limb);
+  vec3 rgb = u_amber.rgb * a + u_ink.rgb * limb;
+
+  // City lights. Texture coordinates from lat/lon; the gradient of u uses
+  // whichever longitude field has no seam at this pixel, so the mip choice
+  // stays correct across the antimeridian.
+  // Lights only where d < 0.5 (the dark half of the twilight band and the
+  // night side), fading in from the terminator.
+  float night = 1.0 - smoothstep(0.0, 0.5, day_factor(n));
+  if (u_rim.y > 0.5 && night > 0.0) {
+    const float kTwoPi = 6.28318531;
+    vec2 uv = vec2(lon / kTwoPi + 0.5, 0.5 - lat / 3.14159265);
+    vec2 dx = vec2(dFdx(lon), dFdx(lat)), dy = vec2(dFdy(lon), dFdy(lat));
+    vec2 dxAlt = vec2(dFdx(lonAlt), dx.y), dyAlt = vec2(dFdy(lonAlt), dy.y);
+    if (abs(dxAlt.x) + abs(dyAlt.x) < abs(dx.x) + abs(dy.x)) {
+      dx = dxAlt;
+      dy = dyAlt;
+    }
+    vec2 k = vec2(1.0 / kTwoPi, -1.0 / 3.14159265);
+    float city = textureGrad(u_city, uv, dx * k, dy * k).r;
+    // Lights fade toward the limb with the same N.V ramp as the graticule.
+    rgb += u_lights.rgb * (u_lights.w * city * night * smoothstep(0.0, 0.25, ndv));
+  }
+  o_color = vec4(rgb, a + limb);
 
   vec4 clip = u_view_proj * vec4(hit, 1.0);
   gl_FragDepth = clamp(clip.z / clip.w, 0.0, 1.0);

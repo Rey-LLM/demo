@@ -1,5 +1,7 @@
 #include "app/cli.hpp"
 
+#include "model/solar.hpp"
+
 #include <charconv>
 #include <cstdio>
 #include <cstring>
@@ -59,6 +61,7 @@ void print_usage(const char* argv0) {
       "  --export DIR           directory for exports (E key / EXPORT button; default: current directory)\n"
       "  --export-after S       write one export S seconds after start, then exit\n"
       "  --pin HUB_ID           start with that hub's panel pinned\n"
+      "  --sun-time ISO8601     fix the day/night terminator at this UTC time (default: model clock)\n"
       "\n"
       "Modes\n"
       "  --headless             ingest + layout benchmark without a window\n"
@@ -254,6 +257,16 @@ bool parse_cli(int argc, char** argv, CliOptions& o, std::string& error) {
       }
     } else if (a == "--pin") {
       if (!str(o.pin_hub)) return false;
+    } else if (a == "--sun-time") {
+      std::string_view v;
+      if (!value(v)) return false;
+      const auto ms = parse_iso8601_utc(v);
+      if (!ms) {
+        error = "invalid value for --sun-time (expected UTC ISO 8601, e.g. 2026-06-21T12:00:00Z)";
+        return false;
+      }
+      o.sun_time_ms = *ms;
+      o.sun_time_set = true;
     } else if (a == "--overlay") {
       o.overlay = true;
     } else if (a == "--no-detail") {

@@ -14,7 +14,7 @@
 // within 2 km of each other (shared landing points), form a graph whose
 // edges are the polyline segments weighted by great-circle length. Each
 // FIAT_CENTER hub is linked to the landing points within 800 km of it (or to
-// its 3 nearest) by straight "backhaul" edges. Dijkstra from every hub gives
+// its 3 nearest within 2500 km) by straight "backhaul" edges. Dijkstra from every hub gives
 // one route per hub pair. Real traffic routing is not public: these routes
 // are MODELED ("ROUTE · MODELED (cable geometry)") and are never presented as
 // the path of any actual transaction.
@@ -75,7 +75,8 @@ struct RouteTable {
 struct RouteOptions {
   double merge_km = 2.0;          // vertices closer than this are one graph node
   double backhaul_km = 800.0;     // hub -> landing links within this distance ...
-  std::size_t backhaul_min = 3;   // ... or to this many nearest landing points
+  std::size_t backhaul_min = 3;   // ... or to this many nearest landing points ...
+  double backhaul_max_km = 2500.0; // ... but never farther than this (no transoceanic "backhaul")
   double max_detour = 2.6;        // reject a route longer than this x great-circle distance
   std::size_t max_points = 512;   // per route (resampled by arc length when longer)
 };
